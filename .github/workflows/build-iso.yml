@@ -1,0 +1,100 @@
+name: Build Thin Client RDP ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      default_server:
+        description: "Indirizzo Server Windows predefinito (opzionale, lascia vuoto per maschera pulita)"
+        required: false
+        default: ""
+        type: string
+      default_domain:
+        description: "Dominio Windows predefinito (opzionale)"
+        required: false
+        default: ""
+        type: string
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-iso:
+    name: Compila ISO Ibrida BIOS + UEFI (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Libera spazio disco opzionale sul runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h
+
+      - name: Installa dipendenze di compilazione ISO
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debootstrap \
+            debian-archive-keyring \
+            squashfs-tools \
+            xorriso \
+            grub-common \
+            grub2-common \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            grub-efi-ia32-bin \
+            mtools \
+            dosfstools \
+            fdisk \
+            rsync
+
+      - name: Applica eventuali parametri opzionali da workflow_dispatch
+        env:
+          INPUT_SERVER: ${{ inputs.default_server }}
+          INPUT_DOMAIN: ${{ inputs.default_domain }}
+        run: |
+          if [ -n "${INPUT_SERVER}" ]; then
+            sed -i "s|^default_server =.*|default_server = ${INPUT_SERVER}|" overlay/etc/rdp-kiosk/kiosk.conf
+          fi
+          if [ -n "${INPUT_DOMAIN}" ]; then
+            sed -i "s|^default_domain =.*|default_domain = ${INPUT_DOMAIN}|" overlay/etc/rdp-kiosk/kiosk.conf
+          fi
+
+      - name: Compila immagine ISO Thin Client RDP
+        run: |
+          sed -i 's/\r$//' build/build-iso.sh
+          chmod +x build/build-iso.sh
+          sudo ./build/build-iso.sh
+
+      - name: Verifica struttura di avvio BIOS + UEFI dell'ISO
+        run: |
+          ls -lh output/
+          fdisk -l output/thinclient-rdp-kiosk-amd64.iso
+          xorriso -indev output/thinclient-rdp-kiosk-amd64.iso -report_el_torito plain
+
+      - name: Carica Artifact ISO pronto per Rufus / BalenaEtcher
+        uses: actions/upload-artifact@v4
+        with:
+          name: thinclient-rdp-kiosk-amd64-iso
+          path: |
+            output/thinclient-rdp-kiosk-amd64.iso
+            output/thinclient-rdp-kiosk-amd64.iso.sha256
+          compression-level: 0
+          retention-days: 30
+
+      - name: Pubblica GitHub Release (automatico su tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            output/thinclient-rdp-kiosk-amd64.iso
+            output/thinclient-rdp-kiosk-amd64.iso.sha256
+          generate_release_notes: true

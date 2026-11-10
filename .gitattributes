@@ -1,0 +1,12 @@
+# Forza fine riga Unix (LF) su tutti i file di testo e script Linux
+# Fondamentale quando si effettua push da Windows verso GitHub Actions
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.cfg text eol=lf
+*.conf text eol=lf
+*.xml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+overlay/** text eol=lf
+build/** text eol=lf

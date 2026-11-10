@@ -1,0 +1,274 @@
+#!/bin/bash
+# Installatore guidato su Disco Interno per Sistema Operativo Thin Client RDP
+# Supporta dischi SATA/SCSI (/dev/sdX), NVMe (/dev/nvmeXnY), eMMC (/dev/mmcblkX) e VirtIO (/dev/vdX)
+# Crea tabella GPT ibrida avviabile sia su PC Legacy BIOS sia su PC/Mini-PC UEFI (64-bit e 32-bit).
+
+set -uo pipefail
+
+export LANG=it_IT.UTF-8
+export LC_ALL=it_IT.UTF-8
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Errore: questo installatore deve essere eseguito come root."
+    exit 1
+fi
+
+loadkeys it 2>/dev/null || true
+
+# Individua la sorgente Live montata (USB / CD)
+LIVE_MEDIUM=""
+for candidate in /run/live/medium /lib/live/mount/medium; do
+    if [ -f "${candidate}/live/filesystem.squashfs" ] && [ -f "${candidate}/boot/vmlinuz" ]; then
+        LIVE_MEDIUM="$candidate"
+        break
+    fi
+done
+
+if [ -z "$LIVE_MEDIUM" ]; then
+    dialog --backtitle "Installazione Thin Client RDP" \
+        --title "Errore Sorgente Live" \
+        --msgbox "Impossibile trovare i file di sistema Live (/live/filesystem.squashfs).\nRiavviare dalla chiavetta USB e riprovare." 10 65
+    exit 1
+fi
+
+# Identifica il disco fisico della chiavetta USB Live per escluderlo dai dischi di destinazione
+LIVE_SRC_DEV="$(findmnt -n -o SOURCE "$LIVE_MEDIUM" 2>/dev/null || true)"
+LIVE_BASE_DISK=""
+if [ -n "$LIVE_SRC_DEV" ] && [ -b "$LIVE_SRC_DEV" ]; then
+    PK="$(lsblk -no pkname "$LIVE_SRC_DEV" 2>/dev/null | head -n1 || true)"
+    if [ -n "$PK" ]; then
+        LIVE_BASE_DISK="$PK"
+    else
+        LIVE_BASE_DISK="$(basename "$LIVE_SRC_DEV")"
+    fi
+fi
+
+# Costruisce l'elenco dei dischi interni disponibili tramite JSON di lsblk
+MENU_ITEMS=()
+while IFS=$'\t' read -r dev_path desc; do
+    [ -n "$dev_path" ] || continue
+    MENU_ITEMS+=("$dev_path" "$desc")
+done < <(LIVE_BASE="$LIVE_BASE_DISK" python3 - <<'PY'
+import json, os, subprocess
+
+live_base = os.environ.get("LIVE_BASE", "").strip()
+proc = subprocess.run(
+    ["lsblk", "-J", "-d", "-o", "NAME,SIZE,MODEL,TRAN,TYPE"],
+    stdout=subprocess.PIPE, text=True, check=False
+)
+data = json.loads(proc.stdout or '{"blockdevices": []}')
+skip_prefixes = ("loop", "ram", "zram", "sr", "fd")
+for dev in data.get("blockdevices", []):
+    name = (dev.get("name") or "").strip()
+    dtype = (dev.get("type") or "").strip()
+    if dtype != "disk" or not name:
+        continue
+    if name.startswith(skip_prefixes):
+        continue
+    if name.startswith("mmcblk") and ("boot" in name or "rpmb" in name):
+        continue
+    if live_base and name == live_base:
+        continue
+    size = (dev.get("size") or "?").strip()
+    model = " ".join((dev.get("model") or "Disco Interno").split())
+    tran = (dev.get("tran") or "interno").strip()
+    print(f"/dev/{name}\t{size}  -  {model} ({tran})")
+PY
+)
+
+if [ "${#MENU_ITEMS[@]}" -eq 0 ]; then
+    dialog --backtitle "Installazione Thin Client RDP" \
+        --title "Nessun Disco Trovato" \
+        --msgbox "Nessun disco interno rilevato su questo PC/Mini-PC.\nVerifica nel BIOS/UEFI che il controller SATA/NVMe/eMMC sia in modalità AHCI (non RAID/RST)." 11 70
+    exit 1
+fi
+
+TARGET_DISK=$(dialog --stdout \
+    --backtitle "Installazione Sistema Operativo Thin Client RDP" \
+    --title "Selezione Disco Interno" \
+    --cancel-label "Annulla e Riavvia" \
+    --menu "Seleziona il disco interno su cui installare il Thin Client RDP.\nATTENZIONE: Tutti i dati presenti sul disco selezionato verranno cancellati!" \
+    16 74 6 \
+    "${MENU_ITEMS[@]}") || exit 0
+
+DISK_INFO="$(lsblk -d -n -o SIZE,MODEL "$TARGET_DISK" 2>/dev/null | tr -s ' ')"
+
+dialog --backtitle "Installazione Sistema Operativo Thin Client RDP" \
+    --title "Conferma Formattazione" \
+    --yes-label "Installa Ora" \
+    --no-label "Annulla" \
+    --defaultno \
+    --yesno "Confermi l'installazione definitiva su:\n\n  Disco: ${TARGET_DISK} (${DISK_INFO})\n\nL'intero disco verrà ripartizionato per avvio BIOS + UEFI e tutti i dati esistenti andranno persi." 13 70 || exit 0
+
+# Configurazione opzionale Server/Dominio predefiniti
+DEFAULT_SERVER=$(dialog --stdout \
+    --backtitle "Installazione Sistema Operativo Thin Client RDP" \
+    --title "Indirizzo Server Predefinito (Opzionale)" \
+    --ok-label "Continua" \
+    --nocancel \
+    --inputbox "Vuoi precompilare già ora l'indirizzo del Server Windows?\n(Puoi anche lasciare VUOTO: l'indirizzo inserito nella maschera grafica verrà memorizzato automaticamente)" \
+    11 76 "")
+
+DEFAULT_DOMAIN=""
+if [ -n "${DEFAULT_SERVER// /}" ]; then
+    DEFAULT_DOMAIN=$(dialog --stdout \
+        --backtitle "Installazione Sistema Operativo Thin Client RDP" \
+        --title "Dominio Predefinito (Opzionale)" \
+        --ok-label "Continua" \
+        --nocancel \
+        --inputbox "Vuoi precompilare il Dominio Windows?\nLascia VUOTO se opzionale o non utilizzato:" \
+        11 72 "")
+fi
+
+clear
+echo "=================================================================="
+echo " Installazione Thin Client RDP su ${TARGET_DISK} in corso..."
+echo "=================================================================="
+
+# 1. Smonta eventuali partizioni attive sul disco di destinazione
+for part in $(lsblk -ln -o NAME "$TARGET_DISK" | tail -n +2); do
+    swapoff "/dev/${part}" 2>/dev/null || true
+    umount -lf "/dev/${part}" 2>/dev/null || true
+done
+
+# 2. Pulizia firme precedenti e creazione tabella GPT ibrida BIOS + UEFI
+echo "[1/5] Partizionamento GPT ibrido (BIOS + UEFI)..."
+sgdisk --zap-all "$TARGET_DISK" >/dev/null 2>&1 || true
+wipefs -a "$TARGET_DISK" >/dev/null 2>&1 || true
+
+parted -s "$TARGET_DISK" \
+    mklabel gpt \
+    mkpart bios_grub 1MiB 3MiB \
+    set 1 bios_grub on \
+    mkpart ESP fat32 3MiB 263MiB \
+    set 2 esp on \
+    mkpart RDPOS_ROOT ext4 263MiB 100%
+
+partprobe "$TARGET_DISK" 2>/dev/null || true
+udevadm settle --timeout=10 || sleep 2
+
+# Calcola suffisso partizioni (/dev/sda1 vs /dev/nvme0n1p1 / /dev/mmcblk0p1)
+if [[ "$TARGET_DISK" =~ [0-9]$ ]]; then
+    PART_PREFIX="${TARGET_DISK}p"
+else
+    PART_PREFIX="${TARGET_DISK}"
+fi
+
+PART_BIOS="${PART_PREFIX}1"
+PART_EFI="${PART_PREFIX}2"
+PART_ROOT="${PART_PREFIX}3"
+
+for _ in $(seq 1 10); do
+    [ -b "$PART_EFI" ] && [ -b "$PART_ROOT" ] && break
+    partprobe "$TARGET_DISK" 2>/dev/null || true
+    sleep 1
+done
+
+if [ ! -b "$PART_EFI" ] || [ ! -b "$PART_ROOT" ]; then
+    echo "Errore: partizioni ${PART_EFI} / ${PART_ROOT} non rilevate dal kernel."
+    sleep 8
+    exit 1
+fi
+
+# 3. Formattazione partizioni EFI (FAT32) e Sistema (EXT4)
+echo "[2/5] Formattazione partizioni EFI e Sistema..."
+wipefs -a "$PART_EFI" >/dev/null 2>&1 || true
+wipefs -a "$PART_ROOT" >/dev/null 2>&1 || true
+
+mkfs.fat -F 32 -n RDPOS_EFI "$PART_EFI"
+mkfs.ext4 -F -O ^metadata_csum_seed -L RDPOS_ROOT "$PART_ROOT"
+
+udevadm settle --timeout=10 || sleep 1
+ROOT_UUID="$(blkid -s UUID -o value "$PART_ROOT")"
+
+# 4. Copia immagine sistema operativo Thin Client
+echo "[3/5] Copia del sistema operativo sul disco interno..."
+TARGET_MNT="/mnt/rdpos_target"
+mkdir -p "$TARGET_MNT"
+mount "$PART_ROOT" "$TARGET_MNT"
+mkdir -p "$TARGET_MNT/boot/efi" "$TARGET_MNT/boot/grub" "$TARGET_MNT/live"
+mount "$PART_EFI" "$TARGET_MNT/boot/efi"
+
+rsync -ah --info=progress2 "$LIVE_MEDIUM/boot/vmlinuz" "$TARGET_MNT/boot/vmlinuz"
+rsync -ah --info=progress2 "$LIVE_MEDIUM/boot/initrd.img" "$TARGET_MNT/boot/initrd.img"
+rsync -ah --info=progress2 "$LIVE_MEDIUM/live/filesystem.squashfs" "$TARGET_MNT/live/filesystem.squashfs"
+chmod 0644 "$TARGET_MNT/boot/vmlinuz" "$TARGET_MNT/boot/initrd.img" "$TARGET_MNT/live/filesystem.squashfs"
+
+# Scrive eventuale configurazione personalizzata su disco se richiesta
+if [ -n "${DEFAULT_SERVER// /}" ] || [ -n "${DEFAULT_DOMAIN// /}" ]; then
+    cat > "$TARGET_MNT/rdp-kiosk.conf" <<EOF
+[kiosk]
+default_server = ${DEFAULT_SERVER}
+default_domain = ${DEFAULT_DOMAIN}
+clear_all_on_disconnect = false
+EOF
+fi
+
+# 5. Installazione Bootloader GRUB (Legacy BIOS + UEFI 64-bit + UEFI 32-bit)
+echo "[4/5] Installazione bootloader GRUB per BIOS e UEFI..."
+grub-install \
+    --target=i386-pc \
+    --boot-directory="$TARGET_MNT/boot" \
+    --recheck \
+    "$TARGET_DISK"
+
+if [ -d /sys/firmware/efi ]; then
+    grub-install \
+        --target=x86_64-efi \
+        --efi-directory="$TARGET_MNT/boot/efi" \
+        --boot-directory="$TARGET_MNT/boot" \
+        --bootloader-id="ThinClientRDP" \
+        --recheck || true
+fi
+
+grub-install \
+    --target=x86_64-efi \
+    --efi-directory="$TARGET_MNT/boot/efi" \
+    --boot-directory="$TARGET_MNT/boot" \
+    --removable \
+    --no-nvram \
+    --recheck
+
+grub-install \
+    --target=i386-efi \
+    --efi-directory="$TARGET_MNT/boot/efi" \
+    --boot-directory="$TARGET_MNT/boot" \
+    --removable \
+    --no-nvram \
+    --recheck >/dev/null 2>&1 || true
+
+# 6. Generazione configurazione GRUB avvio rapido Kiosk
+echo "[5/5] Scrittura configurazione di avvio rapido..."
+cat > "$TARGET_MNT/boot/grub/grub.cfg" <<EOF
+set default=0
+set timeout=1
+set timeout_style=hidden
+
+insmod all_video
+insmod gfxterm
+insmod part_gpt
+insmod ext2
+
+menuentry "Thin Client RDP Kiosk" {
+    search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
+    linux /boot/vmlinuz boot=live components quiet loglevel=3 live-media=/dev/disk/by-uuid/${ROOT_UUID} locales=it_IT.UTF-8 keyboard-layouts=it timezone=Europe/Rome
+    initrd /boot/initrd.img
+}
+
+menuentry "Thin Client RDP Kiosk (Compatibilita Video - nomodeset)" {
+    search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
+    linux /boot/vmlinuz boot=live components quiet nomodeset live-media=/dev/disk/by-uuid/${ROOT_UUID} locales=it_IT.UTF-8 keyboard-layouts=it timezone=Europe/Rome
+    initrd /boot/initrd.img
+}
+EOF
+
+sync
+umount "$TARGET_MNT/boot/efi"
+umount "$TARGET_MNT"
+
+dialog --backtitle "Installazione Completata" \
+    --title "Installazione Riuscita" \
+    --ok-label "Riavvia Ora" \
+    --msgbox "Il Sistema Operativo Thin Client RDP è stato installato con successo su ${TARGET_DISK}!\n\nRimuovi la chiavetta USB quando lo schermo si spegne per avviare dal disco interno." 11 70
+
+exit 0

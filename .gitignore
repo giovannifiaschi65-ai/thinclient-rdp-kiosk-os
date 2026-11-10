@@ -1,0 +1,11 @@
+# Output di compilazione ISO e directory temporanee di build
+*.iso
+*.sha256
+work/
+chroot/
+iso_root/
+output/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

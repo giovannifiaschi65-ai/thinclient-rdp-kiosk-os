@@ -1,0 +1,28 @@
+#!/bin/bash
+# Entrypoint eseguito automaticamente su tty1 al login dell'utente kiosk
+trap '' INT QUIT TSTP
+
+export LANG=it_IT.UTF-8
+export LC_ALL=it_IT.UTF-8
+
+# Esegue solo su tty1
+if [ "$(tty)" != "/dev/tty1" ]; then
+    exit 0
+fi
+
+# Modalità Installazione su Disco Interno (selezionata da menu GRUB)
+if grep -qw "rdp.install=1" /proc/cmdline; then
+    clear
+    sudo /usr/local/sbin/rdp-install-disk
+    echo "Riavvio del sistema in corso..."
+    sleep 2
+    sudo /usr/sbin/reboot
+    exit 0
+fi
+
+# Modalità Kiosk Grafica (ciclo continuo anti-crash, zero shell)
+while true; do
+    clear
+    startx /usr/local/bin/kiosk-xsession -- vt1 -keeptty >/tmp/kiosk-xorg.log 2>&1
+    sleep 1
+done

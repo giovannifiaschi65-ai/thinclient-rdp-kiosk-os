@@ -1,0 +1,967 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Interfaccia grafica Kiosk Thin Client RDP (GTK 3 + FreeRDP con NLA).
+Progettata per avvio diretto su X11 senza desktop environment.
+"""
+
+import configparser
+import datetime
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
+
+
+CONFIG_PATHS = [
+    Path("/etc/rdp-kiosk/kiosk.conf"),
+    Path("/run/live/medium/rdp-kiosk.conf"),
+    Path("/lib/live/mount/medium/rdp-kiosk.conf"),
+    Path("/var/lib/rdp-kiosk/saved-target.conf"),
+]
+
+NORMAL_EXIT_CODES = {
+    0,   # Chiusura pulita
+    1,   # ERRINFO_RPC_INITIATED_DISCONNECT (disconnessione lato server)
+    2,   # ERRINFO_RPC_INITIATED_LOGOFF (logoff amministrativo)
+    11,  # ERRINFO_RPC_INITIATED_DISCONNECT_BY_USER (Utente -> Disconnetti)
+    12,  # ERRINFO_LOGOFF_BY_USER (Utente -> Esci / Disconnetti sessione)
+}
+
+KIOSK_CSS = b"""
+window.kiosk-window {
+    background-color: #0f172a;
+    background-image: linear-gradient(145deg, #0f172a 0%, #1e293b 100%);
+    color: #f8fafc;
+    font-family: "Cantarell", "DejaVu Sans", "Liberation Sans", sans-serif;
+}
+
+.topbar {
+    background-color: rgba(15, 23, 42, 0.78);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+    padding: 14px 28px;
+}
+
+.brand-title {
+    color: #f8fafc;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+}
+
+.status-pill {
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.status-online {
+    background-color: rgba(16, 185, 129, 0.16);
+    color: #34d399;
+    border: 1px solid rgba(52, 211, 153, 0.35);
+}
+
+.status-waiting {
+    background-color: rgba(245, 158, 11, 0.16);
+    color: #fbbf24;
+    border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+.status-offline {
+    background-color: rgba(239, 68, 68, 0.16);
+    color: #f87171;
+    border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.kbd-badge {
+    background-color: rgba(148, 163, 184, 0.16);
+    color: #cbd5e1;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.clock-label {
+    color: #e2e8f0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.login-card {
+    background-color: #ffffff;
+    color: #0f172a;
+    border-radius: 16px;
+    padding: 36px 40px 30px 40px;
+    box-shadow: 0 24px 48px rgba(2, 6, 23, 0.55);
+}
+
+.card-header {
+    color: #0f172a;
+    font-size: 24px;
+    font-weight: 700;
+}
+
+.card-subtitle {
+    color: #475569;
+    font-size: 14px;
+}
+
+.field-label {
+    color: #1e293b;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.optional-hint {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 400;
+}
+
+entry.kiosk-entry {
+    background-color: #f8fafc;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 10px 14px;
+    min-height: 24px;
+    font-size: 15px;
+}
+
+entry.kiosk-entry:focus {
+    background-color: #ffffff;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+.alert-banner {
+    border-radius: 8px;
+    padding: 11px 14px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.alert-error {
+    background-color: #fef2f2;
+    color: #b91c1c;
+    border: 1px solid #fecaca;
+}
+
+.alert-info {
+    background-color: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+}
+
+button.btn-connect {
+    background-image: none;
+    background-color: #2563eb;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    padding: 13px 20px;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+button.btn-connect:hover {
+    background-color: #1d4ed8;
+}
+
+button.btn-connect:disabled {
+    background-color: #93c5fd;
+    color: #eff6ff;
+}
+
+button.btn-secondary {
+    background-image: none;
+    background-color: #f1f5f9;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+button.btn-secondary:hover {
+    background-color: #e2e8f0;
+}
+
+button.btn-danger {
+    background-image: none;
+    background-color: #fff1f2;
+    color: #be123c;
+    border: 1px solid #fecdd3;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+button.btn-danger:hover {
+    background-color: #ffe4e6;
+}
+
+button.btn-danger-solid {
+    background-image: none;
+    background-color: #dc2626;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    padding: 11px 20px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+button.btn-danger-solid:hover {
+    background-color: #b91c1c;
+}
+"""
+
+
+def load_kiosk_config() -> dict:
+    parser = configparser.ConfigParser(interpolation=None)
+    for cfg_path in CONFIG_PATHS:
+        if cfg_path.is_file():
+            try:
+                parser.read(cfg_path, encoding="utf-8")
+            except Exception:
+                pass
+
+    section = parser["kiosk"] if "kiosk" in parser else {}
+    return {
+        "title": section.get("title", "Postazione Thin Client RDP").strip() or "Postazione Thin Client RDP",
+        "subtitle": section.get(
+            "subtitle", "Inserisci le credenziali per accedere al Server Windows"
+        ).strip(),
+        "default_server": section.get("default_server", "").strip(),
+        "default_domain": section.get("default_domain", "").strip(),
+        "clear_all_on_disconnect": section.get("clear_all_on_disconnect", "false").strip().lower()
+        in ("1", "true", "yes", "si", "sì"),
+        "extra_freerdp_args": section.get("extra_freerdp_args", "").strip(),
+    }
+
+
+def detect_freerdp() -> tuple[str, bool, bool]:
+    """
+    Rileva il binario FreeRDP disponibile e verifica:
+      - se è FreeRDP 3.x (is_v3)
+      - se supporta /args-from:stdin (supports_args_from)
+    """
+    for candidate, is_v3 in (("/usr/bin/xfreerdp3", True), ("/usr/bin/xfreerdp", False)):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            supports_args_from = False
+            try:
+                proc = subprocess.run(
+                    [candidate, "--help"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=4,
+                )
+                if "/args-from" in (proc.stdout or ""):
+                    supports_args_from = True
+            except Exception:
+                pass
+            return candidate, is_v3, supports_args_from
+
+    found = shutil.which("xfreerdp3") or shutil.which("xfreerdp") or "/usr/bin/xfreerdp"
+    return found, found.endswith("3"), False
+
+
+def get_ethernet_status() -> tuple[str, str]:
+    """
+    Restituisce (stato, testo_descrittivo) per la rete cablata:
+      stato in {"online", "waiting", "offline"}
+    """
+    try:
+        proc = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show", "scope", "global"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+        ips = []
+        for line in (proc.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[1] != "lo":
+                ip_addr = parts[3].split("/")[0]
+                ips.append((parts[1], ip_addr))
+        if ips:
+            iface, ip_addr = ips[0]
+            return "online", f"● Rete Ethernet attiva ({ip_addr})"
+    except Exception:
+        pass
+
+    # Verifica presenza portante fisica (cavo collegato in attesa DHCP)
+    carrier_up = False
+    net_dir = Path("/sys/class/net")
+    if net_dir.is_dir():
+        for iface_dir in net_dir.iterdir():
+            if iface_dir.name == "lo" or iface_dir.name.startswith(("virbr", "docker", "veth")):
+                continue
+            carrier_file = iface_dir / "carrier"
+            try:
+                if carrier_file.read_text(encoding="utf-8").strip() == "1":
+                    carrier_up = True
+                    break
+            except Exception:
+                continue
+
+    if carrier_up:
+        return "waiting", "● Cavo collegato — Acquisizione DHCP in corso..."
+    return "offline", "● Cavo Ethernet scollegato"
+
+
+def translate_freerdp_error(returncode: int, stderr_text: str) -> str:
+    text = (stderr_text or "").upper()
+    if returncode == 5 or "REPLACED_BY_OTHER_CONNECTION" in text:
+        return "La sessione è stata aperta da un'altra postazione."
+    if any(
+        tok in text
+        for tok in (
+            "LOGON_FAILURE",
+            "AUTHENTICATION_FAILED",
+            "WRONG_PASSWORD",
+            "NO_SUCH_USER",
+            "SECURITY_NEGO_CONNECT_FAILED",
+        )
+    ):
+        return "Autenticazione NLA non riuscita. Verifica Utente, Dominio e Password."
+    if "ACCOUNT_LOCKED_OUT" in text:
+        return "Account utente bloccato sul Server Windows. Contatta l'amministratore."
+    if "PASSWORD_EXPIRED" in text or "PASSWORD_MUST_CHANGE" in text:
+        return "La password dell'account Windows è scaduta e deve essere aggiornata."
+    if "ACCOUNT_DISABLED" in text or "ACCOUNT_EXPIRED" in text:
+        return "Account Windows disabilitato o scaduto."
+    if "DNS_NAME_NOT_FOUND" in text:
+        return "Impossibile risolvere il nome del Server Windows (errore DNS)."
+    if any(
+        tok in text
+        for tok in (
+            "CONNECT_TRANSPORT_FAILED",
+            "CONNECT_FAILED",
+            "PEER_DISCONNECTED",
+            "TIMED_OUT",
+        )
+    ):
+        return "Impossibile raggiungere il Server Windows. Verifica l'indirizzo IP/nome e la rete."
+    if "INSUFFICIENT_PRIVILEGES" in text or "ACCESS_DENIED" in text:
+        return "Accesso Desktop Remoto negato per questo utente sul Server Windows."
+    return f"Connessione RDP interrotta (codice {returncode}). Verifica indirizzo e credenziali."
+
+
+class RdpKioskWindow(Gtk.Window):
+    def __init__(self) -> None:
+        super().__init__(title="Thin Client RDP Kiosk")
+        self.config = load_kiosk_config()
+        self.freerdp_bin, self.freerdp_v3, self.supports_args_from = detect_freerdp()
+        self.connecting = False
+        self.pending_power_action = None
+
+        self._apply_css()
+        self._configure_window()
+        self._build_ui()
+        self.reset_mask(initial=True)
+
+        self._update_status_bar()
+        GLib.timeout_add_seconds(2, self._update_status_bar)
+
+    def _apply_css(self) -> None:
+        provider = Gtk.CssProvider()
+        provider.load_from_data(KIOSK_CSS)
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            Gtk.StyleContext.add_provider_for_screen(
+                screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+
+    def _configure_window(self) -> None:
+        self.get_style_context().add_class("kiosk-window")
+        self.set_decorated(False)
+        self.set_resizable(True)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            self.set_default_size(screen.get_width(), screen.get_height())
+        else:
+            self.set_default_size(1280, 720)
+
+        self.fullscreen()
+        # Impedisce chiusura accidentale con Alt+F4
+        self.connect("delete-event", lambda *_args: True)
+
+    def _build_ui(self) -> None:
+        root_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(root_vbox)
+
+        # Barra superiore di stato (Rete Ethernet + Layout IT + Orologio)
+        topbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        topbar.get_style_context().add_class("topbar")
+
+        brand_label = Gtk.Label(label=self.config["title"])
+        brand_label.get_style_context().add_class("brand-title")
+        brand_label.set_halign(Gtk.Align.START)
+        topbar.pack_start(brand_label, False, False, 0)
+
+        spacer = Gtk.Box()
+        topbar.pack_start(spacer, True, True, 0)
+
+        self.net_badge = Gtk.Label(label="● Verifica rete Ethernet...")
+        self.net_badge.get_style_context().add_class("status-pill")
+        self.net_badge.get_style_context().add_class("status-waiting")
+        topbar.pack_start(self.net_badge, False, False, 0)
+
+        kbd_label = Gtk.Label(label="IT")
+        kbd_label.get_style_context().add_class("kbd-badge")
+        kbd_label.set_tooltip_text("Layout tastiera: Italiano (QWERTY)")
+        topbar.pack_start(kbd_label, False, False, 0)
+
+        self.clock_label = Gtk.Label(label="--:--")
+        self.clock_label.get_style_context().add_class("clock-label")
+        topbar.pack_start(self.clock_label, False, False, 0)
+
+        root_vbox.pack_start(topbar, False, False, 0)
+
+        # Contenitore centrale a schermo intero
+        center_outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        center_outer.set_valign(Gtk.Align.CENTER)
+        center_outer.set_halign(Gtk.Align.CENTER)
+        root_vbox.pack_start(center_outer, True, True, 24)
+
+        card_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        card_frame.get_style_context().add_class("login-card")
+        card_frame.set_size_request(480, -1)
+        center_outer.pack_start(card_frame, False, False, 0)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(150)
+        card_frame.pack_start(self.stack, True, True, 0)
+
+        self.stack.add_named(self._build_login_form(), "login")
+        self.stack.add_named(self._build_power_confirm(), "confirm_power")
+
+    def _build_login_form(self) -> Gtk.Widget:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+
+        # Intestazione scheda
+        header_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        title_lbl = Gtk.Label(label="Accesso Desktop Remoto")
+        title_lbl.get_style_context().add_class("card-header")
+        title_lbl.set_halign(Gtk.Align.START)
+        header_box.pack_start(title_lbl, False, False, 0)
+
+        sub_lbl = Gtk.Label(label=self.config["subtitle"])
+        sub_lbl.get_style_context().add_class("card-subtitle")
+        sub_lbl.set_halign(Gtk.Align.START)
+        sub_lbl.set_line_wrap(True)
+        header_box.pack_start(sub_lbl, False, False, 0)
+        vbox.pack_start(header_box, False, False, 2)
+
+        # Banner messaggi (errori / stato connessione)
+        self.banner_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.banner_box.get_style_context().add_class("alert-banner")
+        self.banner_box.set_no_show_all(True)
+
+        self.spinner = Gtk.Spinner()
+        self.banner_box.pack_start(self.spinner, False, False, 0)
+
+        self.banner_label = Gtk.Label(label="")
+        self.banner_label.set_line_wrap(True)
+        self.banner_label.set_max_width_chars(46)
+        self.banner_label.set_xalign(0.0)
+        self.banner_box.pack_start(self.banner_label, True, True, 0)
+        vbox.pack_start(self.banner_box, False, False, 0)
+
+        # Campo 1: Indirizzo Server Windows
+        self.server_entry = self._add_labeled_entry(
+            vbox,
+            label_text="Indirizzo Server Windows",
+            placeholder="es. 192.168.1.10 o srv-rdp.azienda.local",
+        )
+
+        # Campo 2: Dominio (opzionale)
+        self.domain_entry = self._add_labeled_entry(
+            vbox,
+            label_text="Dominio",
+            optional_text="(opzionale)",
+            placeholder="es. AZIENDA (lasciare vuoto se non richiesto)",
+        )
+
+        # Campo 3: Utente
+        self.user_entry = self._add_labeled_entry(
+            vbox,
+            label_text="Utente",
+            placeholder="Nome utente Windows",
+        )
+
+        # Campo 4: Password
+        self.pass_entry = self._add_labeled_entry(
+            vbox,
+            label_text="Password",
+            placeholder="Password",
+            is_password=True,
+        )
+
+        # Navigazione rapida con tasto Invio
+        self.server_entry.connect("activate", lambda _w: self.user_entry.grab_focus() if self.domain_entry.get_text().strip() else self.domain_entry.grab_focus())
+        self.domain_entry.connect("activate", lambda _w: self.user_entry.grab_focus())
+        self.user_entry.connect("activate", lambda _w: self.pass_entry.grab_focus())
+        self.pass_entry.connect("activate", lambda _w: self.on_connect_clicked())
+
+        # Pulsante primario Connetti
+        self.connect_btn = Gtk.Button(label="Connetti")
+        self.connect_btn.get_style_context().add_class("btn-connect")
+        self.connect_btn.connect("clicked", lambda _w: self.on_connect_clicked())
+        vbox.pack_start(self.connect_btn, False, False, 6)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        vbox.pack_start(sep, False, False, 4)
+
+        # Barra pulsanti inferiore: Pulisci | Riavvia | Spegni
+        actions_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        self.clear_btn = Gtk.Button(label="Pulisci")
+        self.clear_btn.get_style_context().add_class("btn-secondary")
+        self.clear_btn.connect("clicked", lambda _w: self.reset_mask(initial=False))
+        actions_row.pack_start(self.clear_btn, False, False, 0)
+
+        row_spacer = Gtk.Box()
+        actions_row.pack_start(row_spacer, True, True, 0)
+
+        self.reboot_btn = Gtk.Button(label="Riavvia")
+        self.reboot_btn.get_style_context().add_class("btn-secondary")
+        self.reboot_btn.connect("clicked", lambda _w: self._prompt_power_action("reboot"))
+        actions_row.pack_start(self.reboot_btn, False, False, 0)
+
+        self.poweroff_btn = Gtk.Button(label="Spegni")
+        self.poweroff_btn.get_style_context().add_class("btn-danger")
+        self.poweroff_btn.connect("clicked", lambda _w: self._prompt_power_action("poweroff"))
+        actions_row.pack_start(self.poweroff_btn, False, False, 0)
+
+        vbox.pack_start(actions_row, False, False, 0)
+        return vbox
+
+    def _add_labeled_entry(
+        self,
+        parent: Gtk.Box,
+        label_text: str,
+        placeholder: str,
+        optional_text: str = "",
+        is_password: bool = False,
+    ) -> Gtk.Entry:
+        field_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        lbl_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        lbl = Gtk.Label(label=label_text)
+        lbl.get_style_context().add_class("field-label")
+        lbl.set_halign(Gtk.Align.START)
+        lbl_row.pack_start(lbl, False, False, 0)
+
+        if optional_text:
+            opt_lbl = Gtk.Label(label=optional_text)
+            opt_lbl.get_style_context().add_class("optional-hint")
+            lbl_row.pack_start(opt_lbl, False, False, 0)
+
+        field_box.pack_start(lbl_row, False, False, 0)
+
+        entry = Gtk.Entry()
+        entry.get_style_context().add_class("kiosk-entry")
+        entry.set_placeholder_text(placeholder)
+        entry.set_hexpand(True)
+
+        if is_password:
+            entry.set_visibility(False)
+            entry.set_invisible_char("●")
+            entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+            entry.set_icon_from_icon_name(
+                Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
+            )
+            entry.set_icon_tooltip_text(
+                Gtk.EntryIconPosition.SECONDARY, "Mostra / Nascondi password"
+            )
+            entry.connect("icon-press", self._on_toggle_password_visibility)
+
+        field_box.pack_start(entry, False, False, 0)
+        parent.pack_start(field_box, False, False, 0)
+        return entry
+
+    def _on_toggle_password_visibility(self, entry: Gtk.Entry, *_args) -> None:
+        visible = not entry.get_visibility()
+        entry.set_visibility(visible)
+        icon = "view-conceal-symbolic" if visible else "view-reveal-symbolic"
+        entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, icon)
+
+    def _build_power_confirm(self) -> Gtk.Widget:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+        vbox.set_valign(Gtk.Align.CENTER)
+
+        self.confirm_title = Gtk.Label(label="Conferma operazione")
+        self.confirm_title.get_style_context().add_class("card-header")
+        self.confirm_title.set_halign(Gtk.Align.START)
+        vbox.pack_start(self.confirm_title, False, False, 0)
+
+        self.confirm_desc = Gtk.Label(label="")
+        self.confirm_desc.get_style_context().add_class("card-subtitle")
+        self.confirm_desc.set_halign(Gtk.Align.START)
+        self.confirm_desc.set_line_wrap(True)
+        self.confirm_desc.set_xalign(0.0)
+        vbox.pack_start(self.confirm_desc, False, False, 0)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        btn_row.set_halign(Gtk.Align.END)
+
+        cancel_btn = Gtk.Button(label="Annulla")
+        cancel_btn.get_style_context().add_class("btn-secondary")
+        cancel_btn.connect("clicked", lambda _w: self.stack.set_visible_child_name("login"))
+        btn_row.pack_start(cancel_btn, False, False, 0)
+
+        self.confirm_exec_btn = Gtk.Button(label="Conferma")
+        self.confirm_exec_btn.get_style_context().add_class("btn-danger-solid")
+        self.confirm_exec_btn.connect("clicked", lambda _w: self._execute_power_action())
+        btn_row.pack_start(self.confirm_exec_btn, False, False, 0)
+
+        vbox.pack_start(btn_row, False, False, 8)
+        return vbox
+
+    def _prompt_power_action(self, action: str) -> None:
+        if self.connecting:
+            return
+        self.pending_power_action = action
+        if action == "reboot":
+            self.confirm_title.set_text("Riavviare la postazione?")
+            self.confirm_desc.set_text(
+                "Il Thin Client verrà riavviato immediatamente e tornerà a questa schermata."
+            )
+            self.confirm_exec_btn.set_label("Riavvia ora")
+        else:
+            self.confirm_title.set_text("Spegnere la postazione?")
+            self.confirm_desc.set_text(
+                "Il Thin Client verrà arrestato completamente in sicurezza."
+            )
+            self.confirm_exec_btn.set_label("Spegni ora")
+        self.stack.set_visible_child_name("confirm_power")
+
+    def _execute_power_action(self) -> None:
+        action = self.pending_power_action
+        self.stack.set_visible_child_name("login")
+        if action == "reboot":
+            self._show_banner("Riavvio del sistema in corso...", is_error=False, spinning=True)
+            subprocess.Popen(["sudo", "/usr/sbin/reboot"])
+        elif action == "poweroff":
+            self._show_banner("Spegnimento del sistema in corso...", is_error=False, spinning=True)
+            subprocess.Popen(["sudo", "/usr/sbin/poweroff"])
+
+    def _update_status_bar(self) -> bool:
+        now_str = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M")
+        self.clock_label.set_text(now_str)
+
+        state, net_text = get_ethernet_status()
+        self.net_badge.set_text(net_text)
+        ctx = self.net_badge.get_style_context()
+        for cls in ("status-online", "status-waiting", "status-offline"):
+            ctx.remove_class(cls)
+        ctx.add_class(f"status-{state}")
+        return True
+
+    def _show_banner(self, message: str, is_error: bool = True, spinning: bool = False) -> None:
+        ctx = self.banner_box.get_style_context()
+        ctx.remove_class("alert-error")
+        ctx.remove_class("alert-info")
+        ctx.add_class("alert-error" if is_error else "alert-info")
+
+        self.banner_label.set_text(message)
+        if spinning:
+            self.spinner.show()
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+            self.spinner.hide()
+
+        self.banner_label.show()
+        self.banner_box.show()
+
+    def _hide_banner(self) -> None:
+        self.spinner.stop()
+        self.banner_box.hide()
+
+    def _set_form_sensitive(self, enabled: bool) -> None:
+        for widget in (
+            self.server_entry,
+            self.domain_entry,
+            self.user_entry,
+            self.pass_entry,
+            self.connect_btn,
+            self.clear_btn,
+            self.reboot_btn,
+            self.poweroff_btn,
+        ):
+            widget.set_sensitive(enabled)
+
+    def _scrub_session_artifacts(self) -> None:
+        """Pulisce gli appunti X11 e i dati temporanei FreeRDP tra una sessione e l'altra."""
+        try:
+            display = Gdk.Display.get_default()
+            if display is not None:
+                for atom_name in ("CLIPBOARD", "PRIMARY"):
+                    cb = Gtk.Clipboard.get_for_display(display, Gdk.Atom.intern(atom_name, False))
+                    cb.set_text("", -1)
+                    cb.clear()
+        except Exception:
+            pass
+
+        freerdp_cfg = Path.home() / ".config" / "freerdp"
+        if freerdp_cfg.exists():
+            shutil.rmtree(freerdp_cfg, ignore_errors=True)
+
+    def reset_mask(self, initial: bool = False) -> None:
+        """Ripristina la maschera pulita: mantiene Server/Dominio memorizzati e azzera Utente/Password."""
+        self._scrub_session_artifacts()
+        self._hide_banner()
+
+        if self.config["clear_all_on_disconnect"] and not initial:
+            self.server_entry.set_text("")
+            self.domain_entry.set_text("")
+        else:
+            self.server_entry.set_text(self.config["default_server"])
+            self.domain_entry.set_text(self.config["default_domain"])
+
+        self.user_entry.set_text("")
+        self.pass_entry.set_text("")
+        self.pass_entry.set_visibility(False)
+        self.pass_entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
+        )
+
+        self.stack.set_visible_child_name("login")
+        if not self.server_entry.get_text().strip():
+            self.server_entry.grab_focus()
+        else:
+            self.user_entry.grab_focus()
+
+    def on_connect_clicked(self) -> None:
+        if self.connecting:
+            return
+
+        server = self.server_entry.get_text().strip()
+        domain = self.domain_entry.get_text().strip()
+        username = self.user_entry.get_text().strip()
+        password = self.pass_entry.get_text()
+
+        # Nasconde sempre la password in chiaro prima di connettersi
+        self.pass_entry.set_visibility(False)
+        self.pass_entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
+        )
+
+        # Validazione base dei campi
+        if not server:
+            self._show_banner("Inserisci l'indirizzo del Server Windows.", is_error=True)
+            self.server_entry.grab_focus()
+            return
+
+        if server.startswith(("/", "-")) or any(ch.isspace() for ch in server):
+            self._show_banner("Indirizzo Server Windows non valido.", is_error=True)
+            self.server_entry.grab_focus()
+            return
+
+        if not username:
+            self._show_banner("Inserisci il nome Utente Windows.", is_error=True)
+            self.user_entry.grab_focus()
+            return
+
+        if username.startswith(("/", "-")):
+            self._show_banner("Formato nome Utente non valido.", is_error=True)
+            self.user_entry.grab_focus()
+            return
+
+        # Supporta formato DOMINIO\utente anche se inserito direttamente nel campo Utente
+        if "\\" in username and not domain:
+            parts = username.split("\\", 1)
+            domain, username = parts[0].strip(), parts[1].strip()
+            self.domain_entry.set_text(domain)
+            self.user_entry.set_text(username)
+
+        if domain and domain.startswith(("/", "-")):
+            self._show_banner("Formato Dominio non valido.", is_error=True)
+            self.domain_entry.grab_focus()
+            return
+
+        # Memorizza subito Server e Dominio in memoria (e su disco nel thread di avvio)
+        if not self.config["clear_all_on_disconnect"]:
+            self.config["default_server"] = server
+            self.config["default_domain"] = domain
+
+        if not password:
+            self._show_banner("Inserisci la Password per l'autenticazione NLA.", is_error=True)
+            self.pass_entry.grab_focus()
+            return
+
+        net_state, _ = get_ethernet_status()
+        if net_state != "online":
+            self._show_banner(
+                "Rete Ethernet non pronta. Verifica il cavo di rete e l'assegnazione DHCP.",
+                is_error=True,
+            )
+            return
+
+        self.connecting = True
+        self._set_form_sensitive(False)
+        self._show_banner(
+            f"Connessione NLA a {server} in corso...", is_error=False, spinning=True
+        )
+
+        worker = threading.Thread(
+            target=self._run_freerdp_session,
+            args=(server, domain, username, password),
+            daemon=True,
+        )
+        worker.start()
+
+    def _build_freerdp_args(
+        self, server: str, domain: str, username: str, password: str
+    ) -> list[str]:
+        kbd_flag = "/kbd:layout:0x00000410" if self.freerdp_v3 else "/kbd:0x00000410"
+        args = [
+            f"/v:{server}",
+            f"/u:{username}",
+            f"/p:{password}",
+            "/sec:nla",
+            "/cert:ignore",
+            "/f",
+            "-toggle-fullscreen",
+            "/dynamic-resolution",
+            "/network:auto",
+            "+clipboard",
+            "/sound",
+            kbd_flag,
+            "/title:Sessione Desktop Remoto",
+        ]
+        if domain:
+            args.insert(2, f"/d:{domain}")
+
+        extra = self.config.get("extra_freerdp_args", "")
+        if extra:
+            try:
+                args.extend([tok for tok in shlex.split(extra) if tok])
+            except ValueError:
+                pass
+        return args
+
+    def _persist_target_on_disk(self, server: str, domain: str) -> None:
+        if self.config["clear_all_on_disconnect"]:
+            return
+        try:
+            subprocess.run(
+                ["sudo", "/usr/local/sbin/rdp-save-target", server, domain],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=6,
+            )
+        except Exception:
+            pass
+
+    def _run_freerdp_session(
+        self, server: str, domain: str, username: str, password: str
+    ) -> None:
+        self._persist_target_on_disk(server, domain)
+        rdp_args = self._build_freerdp_args(server, domain, username, password)
+        started_at = time.monotonic()
+
+        try:
+            if self.supports_args_from:
+                proc = subprocess.Popen(
+                    [self.freerdp_bin, "/args-from:stdin"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                stdin_payload = "\n".join(rdp_args) + "\n"
+                _, stderr_data = proc.communicate(input=stdin_payload)
+            else:
+                proc = subprocess.Popen(
+                    [self.freerdp_bin, *rdp_args],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                _, stderr_data = proc.communicate()
+
+            returncode = proc.returncode
+        except FileNotFoundError:
+            returncode = -1
+            stderr_data = "Impossibile trovare il client FreeRDP installato."
+        except Exception as exc:
+            returncode = -1
+            stderr_data = str(exc)
+
+        elapsed = time.monotonic() - started_at
+        GLib.idle_add(self._on_freerdp_finished, returncode, stderr_data or "", elapsed)
+
+    def _on_freerdp_finished(
+        self, returncode: int, stderr_data: str, elapsed_seconds: float
+    ) -> bool:
+        self.connecting = False
+        self._set_form_sensitive(True)
+
+        # Se la sessione si è chiusa normalmente (Disconnetti / Esci) o è durata oltre 15s,
+        # torniamo sempre alla maschera completamente pulita per l'utente successivo.
+        if returncode in NORMAL_EXIT_CODES or (returncode == 5):
+            self.reset_mask(initial=False)
+            if returncode == 5:
+                self._show_banner(
+                    "Sessione trasferita su un'altra postazione.", is_error=False
+                )
+        elif elapsed_seconds >= 15.0:
+            self.reset_mask(initial=False)
+            self._show_banner(
+                "La sessione remota si è interrotta. È possibile riconnettersi.",
+                is_error=True,
+            )
+        else:
+            # Errore immediato in fase di connessione o autenticazione NLA:
+            # azzera sempre la password per sicurezza e mostra il motivo in italiano.
+            self._scrub_session_artifacts()
+            self.pass_entry.set_text("")
+            error_msg = (
+                stderr_data
+                if returncode == -1
+                else translate_freerdp_error(returncode, stderr_data)
+            )
+            self._show_banner(error_msg, is_error=True)
+            self.pass_entry.grab_focus()
+
+        self.present()
+        self.fullscreen()
+        return False
+
+
+def main() -> None:
+    win = RdpKioskWindow()
+    win.show_all()
+    win._hide_banner()
+    GLib.idle_add(lambda: (win.reset_mask(initial=True), False)[1])
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

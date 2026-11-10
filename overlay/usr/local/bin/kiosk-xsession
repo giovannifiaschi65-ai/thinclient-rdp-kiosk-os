@@ -1,0 +1,42 @@
+#!/bin/bash
+# Sessione X11 minimale per Thin Client RDP Kiosk (zero desktop)
+trap '' INT QUIT TSTP
+
+export LANG=it_IT.UTF-8
+export LC_ALL=it_IT.UTF-8
+export GDK_BACKEND=x11
+export NO_AT_BRIDGE=1
+
+# Tastiera italiana su X11
+setxkbmap -model pc105 -layout it 2>/dev/null || true
+
+# Sfondo uniforme scuro e cursore standard (nessuno sfarfallio grigio X11)
+xsetroot -solid "#0f172a" 2>/dev/null || true
+xsetroot -cursor_name left_ptr 2>/dev/null || true
+
+# Disabilita salvaschermo X11
+xset s off 2>/dev/null || true
+xset s noblank 2>/dev/null || true
+xset -dpms 2>/dev/null || true
+
+# Avvia bus D-Bus di sessione se non già presente
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-launch >/dev/null 2>&1; then
+    eval "$(dbus-launch --sh-syntax --exit-with-session)"
+fi
+
+# Avvia PulseAudio in background per il reindirizzamento audio RDP
+if command -v pulseaudio >/dev/null 2>&1; then
+    pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+fi
+
+# Avvia window manager minimale Openbox (senza decorazioni né scorciatoie)
+openbox --config-file /etc/xdg/openbox/rc.xml >/tmp/openbox.log 2>&1 &
+WM_PID=$!
+
+# Ciclo di esecuzione dell'interfaccia Kiosk RDP
+while true; do
+    /usr/local/bin/rdp-kiosk-ui
+    sleep 0.5
+done
+
+kill "$WM_PID" 2>/dev/null || true
