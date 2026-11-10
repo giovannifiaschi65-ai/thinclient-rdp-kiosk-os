@@ -1,0 +1,95 @@
+#!/bin/bash
+# Gestore automount sicuro per chiavette e dischi esterni USB in /media/<nome>
+# Esclude automaticamente il dispositivo di avvio del Thin Client OS.
+
+set -uo pipefail
+
+ACTION="${1:-}"
+DEVNAME="${2:-}"
+
+[ -n "$DEVNAME" ] || exit 0
+DEVPATH="/dev/${DEVNAME}"
+
+mkdir -p /media
+
+if [ "$ACTION" = "remove" ]; then
+    # Smonta eventuali punti di mount in /media associati al dispositivo rimosso
+    while read -r mp; do
+        [ -n "$mp" ] || continue
+        case "$mp" in
+            /media/*)
+                sync
+                umount -lf "$mp" 2>/dev/null || true
+                rmdir "$mp" 2>/dev/null || true
+                ;;
+        esac
+    done < <(findmnt -rn -S "$DEVPATH" -o TARGET 2>/dev/null || true)
+    exit 0
+fi
+
+[ "$ACTION" = "add" ] || exit 0
+[ -b "$DEVPATH" ] || exit 0
+
+# Ignora se già montato altrove (es. chiavetta di avvio Live su /run/live/medium)
+if findmnt -rn -S "$DEVPATH" >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Esclude le partizioni riservate del sistema operativo Thin Client
+FS_LABEL="$(blkid -s LABEL -o value "$DEVPATH" 2>/dev/null || true)"
+FS_TYPE="$(blkid -s TYPE -o value "$DEVPATH" 2>/dev/null || true)"
+
+case "$FS_LABEL" in
+    RDPOS_ROOT|RDPOS_EFI|THINCLIENT_RDP)
+        exit 0
+        ;;
+esac
+
+[ -n "$FS_TYPE" ] || exit 0
+case "$FS_TYPE" in
+    swap|squashfs|iso9660|udf|linux_raid_member|LVM2_member)
+        exit 0
+        ;;
+esac
+
+# Costruisce un nome cartella pulito in /media/
+SAFE_LABEL="$(printf '%s' "$FS_LABEL" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')"
+if [ -z "$SAFE_LABEL" ]; then
+    SAFE_LABEL="USB_${DEVNAME}"
+fi
+
+MOUNT_DIR="/media/${SAFE_LABEL}"
+if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
+    MOUNT_DIR="/media/${SAFE_LABEL}_${DEVNAME}"
+fi
+mkdir -p "$MOUNT_DIR"
+
+KUID="$(id -u kiosk 2>/dev/null || echo 1000)"
+KGID="$(id -g kiosk 2>/dev/null || echo 1000)"
+
+MOUNT_OK=0
+case "$FS_TYPE" in
+    vfat|fat|msdos)
+        mount -t vfat -o "rw,nosuid,nodev,noexec,relatime,uid=${KUID},gid=${KGID},fmask=0022,dmask=0022,iocharset=utf8,shortname=mixed,flush" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
+        ;;
+    exfat)
+        mount -t exfat -o "rw,nosuid,nodev,noexec,relatime,uid=${KUID},gid=${KGID},fmask=0022,dmask=0022,iocharset=utf8" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
+        ;;
+    ntfs)
+        if command -v ntfs-3g >/dev/null 2>&1; then
+            ntfs-3g -o "rw,nosuid,nodev,noexec,uid=${KUID},gid=${KGID},umask=0022,big_writes" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
+        else
+            mount -o "rw,nosuid,nodev,noexec,uid=${KUID},gid=${KGID},umask=0022" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
+        fi
+        ;;
+    *)
+        mount -o "rw,nosuid,nodev,relatime" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
+        ;;
+esac
+
+if [ "$MOUNT_OK" -ne 1 ]; then
+    rmdir "$MOUNT_DIR" 2>/dev/null || true
+    exit 1
+fi
+
+exit 0

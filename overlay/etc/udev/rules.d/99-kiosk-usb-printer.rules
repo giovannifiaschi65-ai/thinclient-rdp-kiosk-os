@@ -1,0 +1,3 @@
+# Configura automaticamente in CUPS le stampanti USB appena collegate
+ACTION=="add", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="07", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-printer-setup.service"
+ACTION=="add", SUBSYSTEM=="usbmisc", KERNEL=="lp[0-9]*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-printer-setup.service"

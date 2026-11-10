@@ -1,0 +1,8 @@
+// Consente all'utente kiosk l'accesso completo a lettori Smart Card / Token CNS / CIE (PC/SC)
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.debian.pcsc-lite.access_pcsc" ||
+         action.id == "org.debian.pcsc-lite.access_card") &&
+        subject.user == "kiosk") {
+        return polkit.Result.YES;
+    }
+});

@@ -1,0 +1,10 @@
+[Unit]
+Description=Automount dispositivo USB /dev/%I per Thin Client RDP
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kiosk-usb-mount add %I
+ExecStop=/usr/local/sbin/kiosk-usb-mount remove %I

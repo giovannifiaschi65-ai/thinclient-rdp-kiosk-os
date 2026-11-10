@@ -233,6 +233,12 @@ button.btn-danger-solid:hover {
 """
 
 
+def _parse_bool(val: str, default: bool = True) -> bool:
+    if not val:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "si", "sì", "on")
+
+
 def load_kiosk_config() -> dict:
     parser = configparser.ConfigParser(interpolation=None)
     for cfg_path in CONFIG_PATHS:
@@ -250,8 +256,18 @@ def load_kiosk_config() -> dict:
         ).strip(),
         "default_server": section.get("default_server", "").strip(),
         "default_domain": section.get("default_domain", "").strip(),
-        "clear_all_on_disconnect": section.get("clear_all_on_disconnect", "false").strip().lower()
-        in ("1", "true", "yes", "si", "sì"),
+        "clear_all_on_disconnect": _parse_bool(
+            section.get("clear_all_on_disconnect", "false"), default=False
+        ),
+        "enable_usb_drives": _parse_bool(
+            section.get("enable_usb_drives", "true"), default=True
+        ),
+        "enable_printers": _parse_bool(
+            section.get("enable_printers", "true"), default=True
+        ),
+        "enable_smartcard": _parse_bool(
+            section.get("enable_smartcard", "true"), default=True
+        ),
         "extra_freerdp_args": section.get("extra_freerdp_args", "").strip(),
     }
 
@@ -716,7 +732,12 @@ class RdpKioskWindow(Gtk.Window):
             widget.set_sensitive(enabled)
 
     def _scrub_session_artifacts(self) -> None:
-        """Pulisce gli appunti X11 e i dati temporanei FreeRDP tra una sessione e l'altra."""
+        """Pulisce gli appunti X11, sincronizza eventuali dischi USB e rimuove cache FreeRDP."""
+        try:
+            os.sync()
+        except Exception:
+            pass
+
         try:
             display = Gdk.Display.get_default()
             if display is not None:
@@ -857,6 +878,13 @@ class RdpKioskWindow(Gtk.Window):
         if domain:
             args.insert(2, f"/d:{domain}")
 
+        if self.config.get("enable_usb_drives", True):
+            args.append("/drive:hotplug,*")
+        if self.config.get("enable_printers", True):
+            args.append("/printer")
+        if self.config.get("enable_smartcard", True):
+            args.append("/smartcard")
+
         extra = self.config.get("extra_freerdp_args", "")
         if extra:
             try:
@@ -882,6 +910,16 @@ class RdpKioskWindow(Gtk.Window):
         self, server: str, domain: str, username: str, password: str
     ) -> None:
         self._persist_target_on_disk(server, domain)
+        if self.config.get("enable_printers", True):
+            try:
+                subprocess.run(
+                    ["sudo", "/usr/local/sbin/kiosk-printer-autoconfig"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=8,
+                )
+            except Exception:
+                pass
         rdp_args = self._build_freerdp_args(server, domain, username, password)
         started_at = time.monotonic()
 

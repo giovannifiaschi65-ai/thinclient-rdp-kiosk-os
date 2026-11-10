@@ -1,0 +1,12 @@
+[Unit]
+Description=Configurazione automatica stampanti USB locali in CUPS
+After=cups.service
+Wants=cups.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/local/sbin/kiosk-printer-autoconfig
+
+[Install]
+WantedBy=multi-user.target

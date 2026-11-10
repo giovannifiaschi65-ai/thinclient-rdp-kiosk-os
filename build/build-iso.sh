@@ -100,8 +100,9 @@ EOF
 
 echo "Europe/Rome" > "${CHROOT_DIR}/etc/timezone"
 ln -sf /usr/share/zoneinfo/Europe/Rome "${CHROOT_DIR}/etc/localtime"
+echo "a4" > "${CHROOT_DIR}/etc/papersize"
 
-echo "==> [4/8] Installazione Kernel, Firmware, X11, GTK3, FreeRDP e Bootloader..."
+echo "==> [4/8] Installazione Kernel, Firmware, X11, GTK3, FreeRDP, USB/CUPS/SmartCard..."
 chroot "${CHROOT_DIR}" /bin/bash -eux <<'CHROOT_PKG'
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NONINTERACTIVE_SEEN=true
@@ -167,6 +168,29 @@ apt-get install -y --no-install-recommends \
     pulseaudio \
     libpulse0 \
     alsa-utils \
+    exfatprogs \
+    ntfs-3g \
+    cups \
+    cups-client \
+    cups-bsd \
+    cups-filters \
+    cups-browsed \
+    ipp-usb \
+    avahi-daemon \
+    ghostscript \
+    libpaper1 \
+    libpaper-utils \
+    printer-driver-gutenprint \
+    printer-driver-hpcups \
+    printer-driver-postscript-hp \
+    printer-driver-brlaser \
+    printer-driver-splix \
+    foomatic-db-compressed-ppds \
+    openprinting-ppds \
+    polkitd \
+    pcscd \
+    libpcsclite1 \
+    libccid \
     sudo \
     util-linux \
     procps \
@@ -207,15 +231,25 @@ echo "==> [5/8] Copia file overlay Kiosk e configurazione sicurezza/rete..."
 cp -a "${PROJECT_ROOT}/overlay/." "${CHROOT_DIR}/"
 
 # Permessi rigorosi per eseguibili e sudoers
-mkdir -p "${CHROOT_DIR}/var/lib/rdp-kiosk"
+mkdir -p "${CHROOT_DIR}/var/lib/rdp-kiosk" "${CHROOT_DIR}/media"
 chmod 0755 \
     "${CHROOT_DIR}/usr/local/bin/kiosk-tty-launcher" \
     "${CHROOT_DIR}/usr/local/bin/kiosk-xsession" \
     "${CHROOT_DIR}/usr/local/bin/rdp-kiosk-ui" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-install-disk" \
-    "${CHROOT_DIR}/usr/local/sbin/rdp-save-target"
+    "${CHROOT_DIR}/usr/local/sbin/rdp-save-target" \
+    "${CHROOT_DIR}/usr/local/sbin/kiosk-usb-mount" \
+    "${CHROOT_DIR}/usr/local/sbin/kiosk-printer-autoconfig"
 chmod 0440 "${CHROOT_DIR}/etc/sudoers.d/kiosk-power"
 chown root:root "${CHROOT_DIR}/etc/sudoers.d/kiosk-power"
+
+# Configura cups-browsed per creare automaticamente code solo per stampanti USB locali (ipp-usb)
+if [ -f "${CHROOT_DIR}/etc/cups/cups-browsed.conf" ]; then
+    sed -i 's/^#*BrowseRemoteProtocols.*/BrowseRemoteProtocols none/' "${CHROOT_DIR}/etc/cups/cups-browsed.conf"
+    sed -i 's/^#*CreateIPPPrinterQueues.*/CreateIPPPrinterQueues LocalOnly/' "${CHROOT_DIR}/etc/cups/cups-browsed.conf"
+    grep -q '^BrowseRemoteProtocols ' "${CHROOT_DIR}/etc/cups/cups-browsed.conf" || echo 'BrowseRemoteProtocols none' >> "${CHROOT_DIR}/etc/cups/cups-browsed.conf"
+    grep -q '^CreateIPPPrinterQueues ' "${CHROOT_DIR}/etc/cups/cups-browsed.conf" || echo 'CreateIPPPrinterQueues LocalOnly' >> "${CHROOT_DIR}/etc/cups/cups-browsed.conf"
+fi
 
 # Compatibilità Xorg sia con driver moderni KMS (modesetting) sia legacy VESA/nomodeset
 mkdir -p "${CHROOT_DIR}/etc/X11"
@@ -231,7 +265,9 @@ chroot "${CHROOT_DIR}" /bin/bash -n \
     /usr/local/bin/kiosk-tty-launcher \
     /usr/local/bin/kiosk-xsession \
     /usr/local/sbin/rdp-install-disk \
-    /usr/local/sbin/rdp-save-target
+    /usr/local/sbin/rdp-save-target \
+    /usr/local/sbin/kiosk-usb-mount \
+    /usr/local/sbin/kiosk-printer-autoconfig
 
 # Configurazione NetworkManager: DHCP automatico via MAC su tutte le schede Ethernet
 mkdir -p "${CHROOT_DIR}/etc/NetworkManager/conf.d"
@@ -266,9 +302,12 @@ echo "==> [6/8] Creazione utente Kiosk, servizi systemd e generazione initramfs.
 chroot "${CHROOT_DIR}" /bin/bash -eux <<'CHROOT_CFG'
 export DEBIAN_FRONTEND=noninteractive
 
-# Crea utente non privilegiato 'kiosk'
+# Crea utente non privilegiato 'kiosk' (inclusi gruppi audio, rete e stampa CUPS)
+for grp in plugdev lp lpadmin; do
+    getent group "$grp" >/dev/null 2>&1 || groupadd -r "$grp"
+done
 if ! id -u kiosk >/dev/null 2>&1; then
-    useradd -m -s /bin/bash -G video,render,input,audio,netdev kiosk
+    useradd -m -s /bin/bash -G video,render,input,audio,netdev,plugdev,lp,lpadmin kiosk
 fi
 
 # Blocca password di accesso diretto (nessun login da remoto/console manuale)
@@ -285,9 +324,14 @@ EOF
 cp /home/kiosk/.bash_profile /home/kiosk/.profile
 chown -R kiosk:kiosk /home/kiosk
 
-# Abilita servizi essenziali e disabilita TTY secondari
+# Abilita servizi essenziali (rete, NTP, stampa CUPS, Smart Card PC/SC) e disabilita TTY secondari
 systemctl enable NetworkManager.service
 systemctl enable systemd-timesyncd.service
+systemctl enable avahi-daemon.service
+systemctl enable cups.service
+systemctl enable cups-browsed.service
+systemctl enable pcscd.socket
+systemctl enable kiosk-printer-setup.service
 systemctl set-default multi-user.target
 systemctl mask getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
 

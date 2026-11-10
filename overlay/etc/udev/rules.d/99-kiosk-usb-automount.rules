@@ -1,0 +1,2 @@
+# Automount chiavette e dischi esterni USB in /media per condivisione FreeRDP (/drive:hotplug,*)
+KERNEL=="sd[a-z]*", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", ACTION=="add", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-usb-mount@%k.service"

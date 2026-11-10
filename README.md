@@ -18,8 +18,11 @@ Sistema Operativo Linux minimale (basato su **Debian 12 Bookworm amd64**) proget
     - **Utente**
     - **Password** *(con icona mostra/nascondi)*
     - Pulsanti **Connetti**, **Pulisci**, **Riavvia** e **Spegni** (con conferma rapida anti-errore) + indicatore stato rete Ethernet in tempo reale.
-- **Sessione FreeRDP a Tutto Schermo con NLA**:
+- **Sessione FreeRDP a Tutto Schermo con NLA e Condivisione Periferiche**:
   - Connessione tramite `xfreerdp` a schermo intero (`/f`, `-toggle-fullscreen`), autenticazione **NLA (`/sec:nla`)**, adattamento dinamico risoluzione, audio e appunti abilitati.
+  - **Chiavette e Dischi Esterni USB (`/drive:hotplug,*`)**: automount automatico a caldo in `/media/` per supporti FAT32, exFAT, NTFS ed ext4 (visibili subito in *Esplora File* sul Server Windows, escludendo la partizione di sistema).
+  - **Stampanti Locali USB (`/printer` + CUPS)**: rilevamento e configurazione automatica delle stampanti USB (sia moderne driverless *IPP-over-USB* sia tradizionali tramite driver PPD con formato predefinito **A4**), inoltrate direttamente nella sessione remota Windows.
+  - **Smart Card / Firma Digitale / CNS / CIE (`/smartcard` + `pcscd`)**: supporto integrato CCID/PC-SC per lettori di smart card e token crittografici USB.
   - **Memorizzazione automatica Server & Ritorno alla maschera pulita**: l'**Indirizzo Server Windows** (e l'eventuale **Dominio**) inserito rimane **memorizzato automaticamente** anche dopo la disconnessione o il riavvio/spegnimento del PC (su disco interno e su USB scrivibili), mentre **Utente, Password, appunti e file temporanei** vengono sempre cancellati a fine sessione con il cursore già pronto sul campo **Utente**.
 - **Sistema Immutabile (Read-Only SquashFS)**: anche quando installato su disco interno, il sistema operativo risiede in un'immagine compressa a sola lettura immune da spegnimenti improvvisi o mancanze di corrente.
 
@@ -90,6 +93,9 @@ Se desideri preimpostare o modificare manualmente la configurazione anche da un 
   default_server = 192.168.1.10
   default_domain = AZIENDA
   clear_all_on_disconnect = false
+  enable_usb_drives = true
+  enable_printers = true
+  enable_smartcard = true
   ```
 
 ---

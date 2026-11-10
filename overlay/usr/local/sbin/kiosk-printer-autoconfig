@@ -1,0 +1,126 @@
+#!/bin/bash
+# Rileva e configura automaticamente in CUPS eventuali stampanti USB locali
+# affinché vengano reindirizzate nella sessione Windows Server tramite FreeRDP (/printer).
+
+set -uo pipefail
+
+# Attende che CUPS sia attivo
+if ! systemctl is-active --quiet cups.service; then
+    systemctl start cups.service 2>/dev/null || true
+    sleep 1
+fi
+
+python3 - <<'PY'
+import os
+import re
+import subprocess
+import urllib.parse
+
+
+def run_cmd(cmd: list[str], timeout: int = 12) -> str:
+    try:
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        return proc.stdout or ""
+    except Exception:
+        return ""
+
+
+existing_out = run_cmd(["lpstat", "-v"])
+existing_uris = set()
+existing_queues = set()
+for line in existing_out.splitlines():
+    # Formato: "device for NomeCoda: usb://..." o "dispositivo per NomeCoda: usb://..."
+    if ":" in line:
+        head, uri = line.split(":", 1)
+        uri = uri.strip()
+        existing_uris.add(uri)
+        qname = head.strip().split()[-1]
+        existing_queues.add(qname)
+
+lpinfo_out = run_cmd(["lpinfo", "-v"], timeout=15)
+usb_uris = []
+for line in lpinfo_out.splitlines():
+    parts = line.strip().split(None, 1)
+    if len(parts) == 2 and parts[1].startswith("usb://"):
+        usb_uris.append(parts[1].strip())
+
+for uri in usb_uris:
+    if uri in existing_uris:
+        continue
+
+    parsed = urllib.parse.urlparse(uri)
+    make = urllib.parse.unquote(parsed.netloc or "USB").strip()
+    model = urllib.parse.unquote((parsed.path or "").lstrip("/")).strip()
+    make_model = f"{make} {model}".strip()
+
+    base_queue = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{make}_{model}").strip("_")
+    if not base_queue:
+        base_queue = "Stampante_USB"
+    queue_name = base_queue[:48]
+    idx = 2
+    while queue_name in existing_queues:
+        queue_name = f"{base_queue[:44]}_{idx}"
+        idx += 1
+
+    # Cerca il driver PPD più adatto nel database CUPS locale
+    ppd_candidates = []
+    if make_model:
+        drv_out = run_cmd(["lpinfo", "--make-and-model", make_model, "-m"], timeout=15)
+        for dline in drv_out.splitlines():
+            dparts = dline.strip().split(None, 1)
+            if dparts and dparts[0] != "raw":
+                ppd_candidates.append(dparts[0])
+
+    chosen_model = ppd_candidates[0] if ppd_candidates else "drv:///sample.drv/generic.ppd"
+
+    res = subprocess.run(
+        [
+            "lpadmin",
+            "-p", queue_name,
+            "-E",
+            "-v", uri,
+            "-m", chosen_model,
+            "-D", make_model or queue_name,
+            "-o", "media=A4",
+            "-o", "PageSize=A4",
+            "-o", "printer-error-policy=retry-job",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if res.returncode != 0:
+        # Fallback coda generica PostScript/raw se sample.drv non fosse applicabile
+        subprocess.run(
+            [
+                "lpadmin",
+                "-p", queue_name,
+                "-E",
+                "-v", uri,
+                "-m", "raw",
+                "-D", make_model or queue_name,
+                "-o", "printer-error-policy=retry-job",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    existing_queues.add(queue_name)
+    # Imposta come stampante predefinita se non ne esiste già una
+    def_out = run_cmd(["lpstat", "-d"])
+    if ":" not in def_out:
+        subprocess.run(
+            ["lpadmin", "-d", queue_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+PY
+
+exit 0
