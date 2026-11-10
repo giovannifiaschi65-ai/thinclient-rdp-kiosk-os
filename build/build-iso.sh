@@ -430,8 +430,7 @@ grub-mkrescue \
     "${ISO_DIR}" \
     -- \
     -volid "THINCLIENT_RDP" \
-    -boot_image any appended_part_as=gpt \
-    -append_partition 5 0x83 "${CFG_IMG}"
+    -append_partition 3 0x83 "${CFG_IMG}"
 
 (
     cd "${OUTPUT_DIR}"

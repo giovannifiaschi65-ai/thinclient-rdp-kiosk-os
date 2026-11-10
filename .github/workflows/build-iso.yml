@@ -82,12 +82,11 @@ jobs:
           TMP_TEST="$(mktemp -d)"
           mkdir -p "${TMP_TEST}/iso/boot/grub"
           echo "set timeout=1" > "${TMP_TEST}/iso/boot/grub/grub.cfg"
-          dd if=/dev/zero of="${TMP_TEST}/cfg.img" bs=1M count=4 status=none
+          dd if=/dev/zero of="${TMP_TEST}/cfg.img" bs=1M count=8 status=none
           mkfs.ext4 -F -L RDPOS_CFG "${TMP_TEST}/cfg.img" >/dev/null
           grub-mkrescue -o "${TMP_TEST}/test.iso" "${TMP_TEST}/iso" -- \
             -volid "THINCLIENT_RDP" \
-            -boot_image any appended_part_as=gpt \
-            -append_partition 5 0x83 "${TMP_TEST}/cfg.img"
+            -append_partition 3 0x83 "${TMP_TEST}/cfg.img"
           fdisk -l "${TMP_TEST}/test.iso"
           rm -rf "${TMP_TEST}"
 
