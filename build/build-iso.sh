@@ -24,6 +24,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 cleanup_mounts() {
+    local had_e=0
+    case "$-" in *e*) had_e=1 ;; esac
     set +e
     for mp in \
         "${CHROOT_DIR}/run" \
@@ -35,6 +37,7 @@ cleanup_mounts() {
             umount -lf "$mp" 2>/dev/null || true
         fi
     done
+    [ "$had_e" -eq 1 ] && set -e || true
 }
 trap cleanup_mounts EXIT
 
@@ -427,8 +430,8 @@ grub-mkrescue \
     "${ISO_DIR}" \
     -- \
     -volid "THINCLIENT_RDP" \
-    -append_partition 5 0x83 "${CFG_IMG}" \
-    -appended_part_as_gpt
+    -boot_image any appended_part_as=gpt \
+    -append_partition 5 0x83 "${CFG_IMG}"
 
 (
     cd "${OUTPUT_DIR}"
