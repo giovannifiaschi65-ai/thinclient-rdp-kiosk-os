@@ -1,0 +1,24 @@
+#!/bin/bash
+# Carica all'avvio la configurazione persistente (IP, Dominio, Utente)
+# dalla partizione dedicata RDPOS_CFG presente sulle chiavette USB Rufus / BalenaEtcher.
+
+set -uo pipefail
+
+mkdir -p /var/lib/rdp-kiosk
+udevadm settle --timeout=5 2>/dev/null || true
+
+CFG_DEV="$(blkid -L RDPOS_CFG 2>/dev/null | head -n1 || true)"
+if [ -n "$CFG_DEV" ] && [ -b "$CFG_DEV" ]; then
+    MNT="/mnt/rdpos_cfg_ro"
+    mkdir -p "$MNT"
+    if mount -o ro "$CFG_DEV" "$MNT" 2>/dev/null; then
+        if [ -f "${MNT}/rdp-kiosk.conf" ]; then
+            cp -f "${MNT}/rdp-kiosk.conf" "/var/lib/rdp-kiosk/saved-target.conf"
+            chmod 0644 "/var/lib/rdp-kiosk/saved-target.conf"
+        fi
+        umount "$MNT" 2>/dev/null || true
+    fi
+    rmdir "$MNT" 2>/dev/null || true
+fi
+
+exit 0

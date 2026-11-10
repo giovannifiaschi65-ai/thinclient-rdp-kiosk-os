@@ -1,6 +1,6 @@
 #!/bin/bash
-# Salva in modo persistente e atomico l'Indirizzo Server Windows e il Dominio
-# mantenendo la partizione di sistema in sola lettura (ro) dopo la scrittura.
+# Salva in modo persistente e atomico Indirizzo Server Windows, Dominio e Nome Utente
+# sia su Disco Interno (ext4), sia su Chiavetta USB Rufus (modalità ISO FAT32 e modalità DD RDPOS_CFG).
 
 set -euo pipefail
 
@@ -10,35 +10,72 @@ fi
 
 SERVER="${1:-}"
 DOMAIN="${2:-}"
+USERNAME="${3:-}"
 
 # Rifiuta caratteri newline o di controllo per sicurezza
 SERVER="$(printf '%s' "$SERVER" | tr -d '\r\n\000')"
 DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '\r\n\000')"
+USERNAME="$(printf '%s' "$USERNAME" | tr -d '\r\n\000')"
 
-write_conf_file() {
+update_or_write_conf() {
     local target_file="$1"
+    if [ -f "$target_file" ]; then
+        python3 - "$target_file" "$SERVER" "$DOMAIN" "$USERNAME" <<'PY' && return 0
+import configparser, os, sys
+
+cfg_path, server, domain, username = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+parser = configparser.ConfigParser(interpolation=None)
+parser.read(cfg_path, encoding="utf-8")
+if "kiosk" not in parser:
+    parser["kiosk"] = {}
+parser["kiosk"]["default_server"] = server
+parser["kiosk"]["default_domain"] = domain
+parser["kiosk"]["default_user"] = username
+parser["kiosk"]["clear_all_on_disconnect"] = "false"
+
+tmp_path = f"{cfg_path}.tmp.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as fh:
+    parser.write(fh)
+os.chmod(tmp_path, 0o644)
+os.replace(tmp_path, cfg_path)
+PY
+    fi
+
     local tmp_file="${target_file}.tmp.$$"
     cat > "$tmp_file" <<EOF
 [kiosk]
 default_server = ${SERVER}
 default_domain = ${DOMAIN}
+default_user = ${USERNAME}
 clear_all_on_disconnect = false
 EOF
     chmod 0644 "$tmp_file"
     mv -f "$tmp_file" "$target_file"
 }
 
-# 1. Salva sempre nello stato locale della sessione corrente
+# 1. Salva sempre nello stato locale attivo
 mkdir -p /var/lib/rdp-kiosk
-write_conf_file "/var/lib/rdp-kiosk/saved-target.conf"
+update_or_write_conf "/var/lib/rdp-kiosk/saved-target.conf"
 
-# 2. Persiste su disco interno (ext4) o chiavetta USB scrivibile (FAT32/exFAT/NTFS)
+# 2. Salva sulla partizione dedicata RDPOS_CFG se presente (Chiavetta USB Rufus DD / BalenaEtcher)
+CFG_DEV="$(blkid -L RDPOS_CFG 2>/dev/null | head -n1 || true)"
+if [ -n "$CFG_DEV" ] && [ -b "$CFG_DEV" ]; then
+    CFG_MNT="/mnt/rdpos_cfg_rw"
+    mkdir -p "$CFG_MNT"
+    if mount -o rw,nosuid,nodev,noexec "$CFG_DEV" "$CFG_MNT" 2>/dev/null; then
+        update_or_write_conf "${CFG_MNT}/rdp-kiosk.conf" || true
+        sync
+        umount "$CFG_MNT" 2>/dev/null || true
+    fi
+    rmdir "$CFG_MNT" 2>/dev/null || true
+fi
+
+# 3. Salva su Disco Interno installato (ext4) o Chiavetta USB Rufus in modalità ISO (FAT32)
 for medium in /run/live/medium /lib/live/mount/medium; do
     if mountpoint -q "$medium" 2>/dev/null; then
         fstype="$(findmnt -n -o FSTYPE "$medium" 2>/dev/null || true)"
         case "$fstype" in
             iso9660|udf|squashfs)
-                # Supporto ottico o ISO raw DD non scrivibile
                 continue
                 ;;
         esac
@@ -50,31 +87,9 @@ for medium in /run/live/medium /lib/live/mount/medium; do
             mount -o remount,rw "$medium" 2>/dev/null || continue
         fi
 
-        if [ -f "${medium}/rdp-kiosk.conf" ]; then
-            # Preserva eventuali parametri personalizzati (title, subtitle, extra_freerdp_args)
-            python3 - "${medium}/rdp-kiosk.conf" "$SERVER" "$DOMAIN" <<'PY' || write_conf_file "${medium}/rdp-kiosk.conf"
-import configparser, os, sys
-
-cfg_path, server, domain = sys.argv[1], sys.argv[2], sys.argv[3]
-parser = configparser.ConfigParser(interpolation=None)
-parser.read(cfg_path, encoding="utf-8")
-if "kiosk" not in parser:
-    parser["kiosk"] = {}
-parser["kiosk"]["default_server"] = server
-parser["kiosk"]["default_domain"] = domain
-parser["kiosk"]["clear_all_on_disconnect"] = "false"
-
-tmp_path = f"{cfg_path}.tmp.{os.getpid()}"
-with open(tmp_path, "w", encoding="utf-8") as fh:
-    parser.write(fh)
-os.chmod(tmp_path, 0o644)
-os.replace(tmp_path, cfg_path)
-PY
-        else
-            write_conf_file "${medium}/rdp-kiosk.conf" || true
-        fi
-
+        update_or_write_conf "${medium}/rdp-kiosk.conf" || true
         sync
+
         if [ "$was_ro" -eq 1 ]; then
             mount -o remount,ro "$medium" 2>/dev/null || true
         fi

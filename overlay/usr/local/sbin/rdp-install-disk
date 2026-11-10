@@ -100,16 +100,37 @@ dialog --backtitle "Installazione Sistema Operativo Thin Client RDP" \
     --defaultno \
     --yesno "Confermi l'installazione definitiva su:\n\n  Disco: ${TARGET_DISK} (${DISK_INFO})\n\nL'intero disco verrà ripartizionato per avvio BIOS + UEFI e tutti i dati esistenti andranno persi." 13 70 || exit 0
 
-# Configurazione opzionale Server/Dominio predefiniti
+# Legge eventuali valori già memorizzati durante la prova da chiavetta USB
+SAVED_SRV=""
+SAVED_DOM=""
+SAVED_USR=""
+for existing_cfg in /var/lib/rdp-kiosk/saved-target.conf "${LIVE_MEDIUM}/rdp-kiosk.conf"; do
+    if [ -f "$existing_cfg" ]; then
+        eval "$(python3 - "$existing_cfg" <<'PY'
+import configparser, shlex, sys
+p = configparser.ConfigParser(interpolation=None)
+p.read(sys.argv[1], encoding="utf-8")
+s = p["kiosk"] if "kiosk" in p else {}
+print("SAVED_SRV=" + shlex.quote(s.get("default_server", "").strip()))
+print("SAVED_DOM=" + shlex.quote(s.get("default_domain", "").strip()))
+print("SAVED_USR=" + shlex.quote(s.get("default_user", "").strip()))
+PY
+)"
+        break
+    fi
+done
+
+# Configurazione opzionale Server/Dominio/Utente predefiniti
 DEFAULT_SERVER=$(dialog --stdout \
     --backtitle "Installazione Sistema Operativo Thin Client RDP" \
     --title "Indirizzo Server Predefinito (Opzionale)" \
     --ok-label "Continua" \
     --nocancel \
-    --inputbox "Vuoi precompilare già ora l'indirizzo del Server Windows?\n(Puoi anche lasciare VUOTO: l'indirizzo inserito nella maschera grafica verrà memorizzato automaticamente)" \
-    11 76 "")
+    --inputbox "Vuoi precompilare già ora l'indirizzo del Server Windows?\n(Puoi anche lasciare VUOTO: IP, Dominio e Utente inseriti nella maschera grafica verranno memorizzati automaticamente)" \
+    12 76 "${SAVED_SRV}")
 
 DEFAULT_DOMAIN=""
+DEFAULT_USER=""
 if [ -n "${DEFAULT_SERVER// /}" ]; then
     DEFAULT_DOMAIN=$(dialog --stdout \
         --backtitle "Installazione Sistema Operativo Thin Client RDP" \
@@ -117,7 +138,15 @@ if [ -n "${DEFAULT_SERVER// /}" ]; then
         --ok-label "Continua" \
         --nocancel \
         --inputbox "Vuoi precompilare il Dominio Windows?\nLascia VUOTO se opzionale o non utilizzato:" \
-        11 72 "")
+        11 72 "${SAVED_DOM}")
+
+    DEFAULT_USER=$(dialog --stdout \
+        --backtitle "Installazione Sistema Operativo Thin Client RDP" \
+        --title "Nome Utente Predefinito (Opzionale)" \
+        --ok-label "Continua" \
+        --nocancel \
+        --inputbox "Vuoi precompilare anche il Nome Utente Windows?\nLascia VUOTO per inserirlo al primo accesso nella maschera grafica:" \
+        11 72 "${SAVED_USR}")
 fi
 
 clear
@@ -195,11 +224,12 @@ rsync -ah --info=progress2 "$LIVE_MEDIUM/live/filesystem.squashfs" "$TARGET_MNT/
 chmod 0644 "$TARGET_MNT/boot/vmlinuz" "$TARGET_MNT/boot/initrd.img" "$TARGET_MNT/live/filesystem.squashfs"
 
 # Scrive eventuale configurazione personalizzata su disco se richiesta
-if [ -n "${DEFAULT_SERVER// /}" ] || [ -n "${DEFAULT_DOMAIN// /}" ]; then
+if [ -n "${DEFAULT_SERVER// /}" ] || [ -n "${DEFAULT_DOMAIN// /}" ] || [ -n "${DEFAULT_USER// /}" ]; then
     cat > "$TARGET_MNT/rdp-kiosk.conf" <<EOF
 [kiosk]
 default_server = ${DEFAULT_SERVER}
 default_domain = ${DEFAULT_DOMAIN}
+default_user = ${DEFAULT_USER}
 clear_all_on_disconnect = false
 EOF
 fi

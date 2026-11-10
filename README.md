@@ -23,7 +23,7 @@ Sistema Operativo Linux minimale (basato su **Debian 12 Bookworm amd64**) proget
   - **Chiavette e Dischi Esterni USB (`/drive:hotplug,*`)**: automount automatico a caldo in `/media/` per supporti FAT32, exFAT, NTFS ed ext4 (visibili subito in *Esplora File* sul Server Windows, escludendo la partizione di sistema).
   - **Stampanti Locali USB (`/printer` + CUPS)**: rilevamento e configurazione automatica delle stampanti USB (sia moderne driverless *IPP-over-USB* sia tradizionali tramite driver PPD con formato predefinito **A4**), inoltrate direttamente nella sessione remota Windows.
   - **Smart Card / Firma Digitale / CNS / CIE (`/smartcard` + `pcscd`)**: supporto integrato CCID/PC-SC per lettori di smart card e token crittografici USB.
-  - **Memorizzazione automatica Server & Ritorno alla maschera pulita**: l'**Indirizzo Server Windows** (e l'eventuale **Dominio**) inserito rimane **memorizzato automaticamente** anche dopo la disconnessione o il riavvio/spegnimento del PC (su disco interno e su USB scrivibili), mentre **Utente, Password, appunti e file temporanei** vengono sempre cancellati a fine sessione con il cursore già pronto sul campo **Utente**.
+  - **Memorizzazione automatica IP, Dominio e Utente**: **Indirizzo Server Windows**, **Dominio** e **Nome Utente** rimangono **memorizzati automaticamente** dopo la disconnessione e dopo lo spegnimento del PC **sia su Disco Interno sia su Chiavetta USB creata con Rufus o BalenaEtcher**, mentre **Password, appunti e file temporanei** vengono sempre cancellati a fine sessione con il cursore già pronto sul campo **Password**.
 - **Sistema Immutabile (Read-Only SquashFS)**: anche quando installato su disco interno, il sistema operativo risiede in un'immagine compressa a sola lettura immune da spegnimenti improvvisi o mancanze di corrente.
 
 ---
@@ -79,19 +79,20 @@ All'accensione dalla chiavetta USB compare per 5 secondi il menu di avvio:
 
 ---
 
-## 4. Memorizzazione Automatica e Personalizzazione (`rdp-kiosk.conf`)
+## 4. Memorizzazione Automatica (su Disco Interno e su Chiavetta Rufus)
 
-Non appena inserisci l'**Indirizzo Server Windows** (e l'eventuale **Dominio**) nella maschera grafica e premi **Connetti**, il sistema lo salva automaticamente in modo persistente sulla partizione di avvio tramite `rdp-save-target` (rimettendo subito la partizione in sola lettura per proteggerla da spegnimenti improvvisi):
+Non appena inserisci **Indirizzo Server Windows**, **Dominio** e **Nome Utente** nella maschera grafica e premi **Connetti**, il sistema li salva automaticamente tramite `rdp-save-target` sia su **Disco Interno** (`RDPOS_ROOT`) sia su **Chiavetta USB creata con Rufus** (sia in modalità ISO/FAT32 sia in modalità DD grazie alla partizione dedicata `RDPOS_CFG` integrata nell'immagine):
 
-- Alla disconnessione e ai successivi riavvii, **Server** e **Dominio** saranno già compilati (ma sempre modificabili se dovesse cambiare IP) e il cursore si posizionerà direttamente sul campo **Utente**.
-- **Utente** e **Password** vengono invece **sempre azzerati** a ogni disconnessione.
+- Alla disconnessione e ai successivi riavvii/spegnimenti, **IP Server**, **Dominio** e **Utente** saranno già compilati (ma sempre modificabili o azzerabili col pulsante **Pulisci**) e il cursore si posizionerà direttamente sul campo **Password**.
+- La **Password** viene invece **sempre azzerata** a ogni disconnessione.
 
-Se desideri preimpostare o modificare manualmente la configurazione anche da un altro PC, puoi modificare il file `rdp-kiosk.conf` sulla chiavetta USB (modalità ISO/FAT32) o inserirlo durante l'installazione su disco:
+Se desideri preimpostare o modificare manualmente la configurazione anche da un altro PC, puoi modificare il file `rdp-kiosk.conf`:
   ```ini
   [kiosk]
   title = Postazione Thin Client RDP
   default_server = 192.168.1.10
   default_domain = AZIENDA
+  default_user = mario.rossi
   clear_all_on_disconnect = false
   enable_usb_drives = true
   enable_printers = true

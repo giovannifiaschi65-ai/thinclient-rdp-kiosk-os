@@ -238,6 +238,7 @@ chmod 0755 \
     "${CHROOT_DIR}/usr/local/bin/rdp-kiosk-ui" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-install-disk" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-save-target" \
+    "${CHROOT_DIR}/usr/local/sbin/rdp-load-config" \
     "${CHROOT_DIR}/usr/local/sbin/kiosk-usb-mount" \
     "${CHROOT_DIR}/usr/local/sbin/kiosk-printer-autoconfig"
 chmod 0440 "${CHROOT_DIR}/etc/sudoers.d/kiosk-power"
@@ -266,6 +267,7 @@ chroot "${CHROOT_DIR}" /bin/bash -n \
     /usr/local/bin/kiosk-xsession \
     /usr/local/sbin/rdp-install-disk \
     /usr/local/sbin/rdp-save-target \
+    /usr/local/sbin/rdp-load-config \
     /usr/local/sbin/kiosk-usb-mount \
     /usr/local/sbin/kiosk-printer-autoconfig
 
@@ -332,6 +334,7 @@ systemctl enable cups.service
 systemctl enable cups-browsed.service
 systemctl enable pcscd.socket
 systemctl enable kiosk-printer-setup.service
+systemctl enable rdp-load-config.service
 systemctl set-default multi-user.target
 systemctl mask getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
 
@@ -397,12 +400,35 @@ mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" \
 
 chmod 0644 "${ISO_DIR}/live/filesystem.squashfs"
 
-echo "==> [8/8] Generazione immagine ISO ibrida BIOS + UEFI (compatibile Rufus/BalenaEtcher)..."
+echo "==> [8/8] Generazione immagine ISO ibrida BIOS + UEFI (compatibile Rufus ISO/DD e BalenaEtcher)..."
+# Prepara anche EFI standalone in /EFI/BOOT per piena compatibilità con Rufus in modalità ISO (FAT32)
+mkdir -p "${ISO_DIR}/EFI/BOOT"
+cat > "${WORK_DIR}/efi-chain.cfg" <<'EOF'
+search --no-floppy --set=root --file /boot/grub/grub.cfg
+configfile /boot/grub/grub.cfg
+EOF
+grub-mkstandalone \
+    -O x86_64-efi \
+    -o "${ISO_DIR}/EFI/BOOT/BOOTX64.EFI" \
+    "boot/grub/grub.cfg=${WORK_DIR}/efi-chain.cfg"
+grub-mkstandalone \
+    -O i386-efi \
+    -o "${ISO_DIR}/EFI/BOOT/BOOTIA32.EFI" \
+    "boot/grub/grub.cfg=${WORK_DIR}/efi-chain.cfg" || true
+
+# Crea partizione persistente dedicata RDPOS_CFG (16 MiB ext4) integrata nell'ISO
+# per salvare IP, Dominio e Utente anche su chiavette Rufus in modalità DD e BalenaEtcher
+CFG_IMG="${WORK_DIR}/rdpos_cfg.img"
+dd if=/dev/zero of="${CFG_IMG}" bs=1M count=16 status=none
+mkfs.ext4 -F -O ^metadata_csum_seed -L RDPOS_CFG "${CFG_IMG}" >/dev/null
+
 grub-mkrescue \
     -o "${ISO_PATH}" \
     "${ISO_DIR}" \
     -- \
-    -volid "THINCLIENT_RDP"
+    -volid "THINCLIENT_RDP" \
+    -append_partition 5 0x83 "${CFG_IMG}" \
+    -appended_part_as_gpt
 
 (
     cd "${OUTPUT_DIR}"

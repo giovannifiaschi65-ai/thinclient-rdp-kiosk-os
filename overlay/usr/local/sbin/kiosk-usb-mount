@@ -40,7 +40,7 @@ FS_LABEL="$(blkid -s LABEL -o value "$DEVPATH" 2>/dev/null || true)"
 FS_TYPE="$(blkid -s TYPE -o value "$DEVPATH" 2>/dev/null || true)"
 
 case "$FS_LABEL" in
-    RDPOS_ROOT|RDPOS_EFI|THINCLIENT_RDP)
+    RDPOS_ROOT|RDPOS_EFI|RDPOS_CFG|THINCLIENT_RDP)
         exit 0
         ;;
 esac

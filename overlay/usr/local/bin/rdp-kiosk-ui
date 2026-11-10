@@ -256,6 +256,7 @@ def load_kiosk_config() -> dict:
         ).strip(),
         "default_server": section.get("default_server", "").strip(),
         "default_domain": section.get("default_domain", "").strip(),
+        "default_user": section.get("default_user", "").strip(),
         "clear_all_on_disconnect": _parse_bool(
             section.get("clear_all_on_disconnect", "false"), default=False
         ),
@@ -556,7 +557,7 @@ class RdpKioskWindow(Gtk.Window):
 
         self.clear_btn = Gtk.Button(label="Pulisci")
         self.clear_btn.get_style_context().add_class("btn-secondary")
-        self.clear_btn.connect("clicked", lambda _w: self.reset_mask(initial=False))
+        self.clear_btn.connect("clicked", lambda _w: self.clear_form_fields())
         actions_row.pack_start(self.clear_btn, False, False, 0)
 
         row_spacer = Gtk.Box()
@@ -752,19 +753,34 @@ class RdpKioskWindow(Gtk.Window):
         if freerdp_cfg.exists():
             shutil.rmtree(freerdp_cfg, ignore_errors=True)
 
+    def clear_form_fields(self) -> None:
+        """Svuota manualmente tutti i campi a schermo per permettere una nuova immissione."""
+        self._scrub_session_artifacts()
+        self._hide_banner()
+        self.server_entry.set_text("")
+        self.domain_entry.set_text("")
+        self.user_entry.set_text("")
+        self.pass_entry.set_text("")
+        self.pass_entry.set_visibility(False)
+        self.pass_entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
+        )
+        self.server_entry.grab_focus()
+
     def reset_mask(self, initial: bool = False) -> None:
-        """Ripristina la maschera pulita: mantiene Server/Dominio memorizzati e azzera Utente/Password."""
+        """Ripristina la maschera: mantiene Server/Dominio/Utente memorizzati e azzera la Password."""
         self._scrub_session_artifacts()
         self._hide_banner()
 
         if self.config["clear_all_on_disconnect"] and not initial:
             self.server_entry.set_text("")
             self.domain_entry.set_text("")
+            self.user_entry.set_text("")
         else:
             self.server_entry.set_text(self.config["default_server"])
             self.domain_entry.set_text(self.config["default_domain"])
+            self.user_entry.set_text(self.config["default_user"])
 
-        self.user_entry.set_text("")
         self.pass_entry.set_text("")
         self.pass_entry.set_visibility(False)
         self.pass_entry.set_icon_from_icon_name(
@@ -774,8 +790,10 @@ class RdpKioskWindow(Gtk.Window):
         self.stack.set_visible_child_name("login")
         if not self.server_entry.get_text().strip():
             self.server_entry.grab_focus()
-        else:
+        elif not self.user_entry.get_text().strip():
             self.user_entry.grab_focus()
+        else:
+            self.pass_entry.grab_focus()
 
     def on_connect_clicked(self) -> None:
         if self.connecting:
@@ -825,10 +843,11 @@ class RdpKioskWindow(Gtk.Window):
             self.domain_entry.grab_focus()
             return
 
-        # Memorizza subito Server e Dominio in memoria (e su disco nel thread di avvio)
+        # Memorizza subito Server, Dominio e Utente in memoria (e su disco/USB nel thread di avvio)
         if not self.config["clear_all_on_disconnect"]:
             self.config["default_server"] = server
             self.config["default_domain"] = domain
+            self.config["default_user"] = username
 
         if not password:
             self._show_banner("Inserisci la Password per l'autenticazione NLA.", is_error=True)
@@ -893,12 +912,12 @@ class RdpKioskWindow(Gtk.Window):
                 pass
         return args
 
-    def _persist_target_on_disk(self, server: str, domain: str) -> None:
+    def _persist_target_on_disk(self, server: str, domain: str, username: str) -> None:
         if self.config["clear_all_on_disconnect"]:
             return
         try:
             subprocess.run(
-                ["sudo", "/usr/local/sbin/rdp-save-target", server, domain],
+                ["sudo", "/usr/local/sbin/rdp-save-target", server, domain, username],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=6,
@@ -909,7 +928,7 @@ class RdpKioskWindow(Gtk.Window):
     def _run_freerdp_session(
         self, server: str, domain: str, username: str, password: str
     ) -> None:
-        self._persist_target_on_disk(server, domain)
+        self._persist_target_on_disk(server, domain, username)
         if self.config.get("enable_printers", True):
             try:
                 subprocess.run(

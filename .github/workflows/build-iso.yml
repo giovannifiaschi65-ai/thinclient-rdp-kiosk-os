@@ -13,6 +13,11 @@ on:
         required: false
         default: ""
         type: string
+      default_user:
+        description: "Nome Utente Windows predefinito (opzionale)"
+        required: false
+        default: ""
+        type: string
   push:
     branches:
       - main
@@ -60,12 +65,16 @@ jobs:
         env:
           INPUT_SERVER: ${{ inputs.default_server }}
           INPUT_DOMAIN: ${{ inputs.default_domain }}
+          INPUT_USER: ${{ inputs.default_user }}
         run: |
           if [ -n "${INPUT_SERVER}" ]; then
             sed -i "s|^default_server =.*|default_server = ${INPUT_SERVER}|" overlay/etc/rdp-kiosk/kiosk.conf
           fi
           if [ -n "${INPUT_DOMAIN}" ]; then
             sed -i "s|^default_domain =.*|default_domain = ${INPUT_DOMAIN}|" overlay/etc/rdp-kiosk/kiosk.conf
+          fi
+          if [ -n "${INPUT_USER}" ]; then
+            sed -i "s|^default_user =.*|default_user = ${INPUT_USER}|" overlay/etc/rdp-kiosk/kiosk.conf
           fi
 
       - name: Compila immagine ISO Thin Client RDP
