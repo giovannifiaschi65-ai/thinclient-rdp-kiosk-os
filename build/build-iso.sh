@@ -239,6 +239,7 @@ chmod 0755 \
     "${CHROOT_DIR}/usr/local/bin/kiosk-tty-launcher" \
     "${CHROOT_DIR}/usr/local/bin/kiosk-xsession" \
     "${CHROOT_DIR}/usr/local/bin/rdp-kiosk-ui" \
+    "${CHROOT_DIR}/usr/local/sbin/rdp-power-action" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-install-disk" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-save-target" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-load-config" \
@@ -268,6 +269,7 @@ chroot "${CHROOT_DIR}" /usr/bin/python3 -m py_compile /usr/local/bin/rdp-kiosk-u
 chroot "${CHROOT_DIR}" /bin/bash -n \
     /usr/local/bin/kiosk-tty-launcher \
     /usr/local/bin/kiosk-xsession \
+    /usr/local/sbin/rdp-power-action \
     /usr/local/sbin/rdp-install-disk \
     /usr/local/sbin/rdp-save-target \
     /usr/local/sbin/rdp-load-config \

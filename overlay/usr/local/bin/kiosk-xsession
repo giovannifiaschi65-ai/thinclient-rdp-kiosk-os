@@ -34,8 +34,9 @@ openbox --config-file /etc/xdg/openbox/rc.xml >/tmp/openbox.log 2>&1 &
 WM_PID=$!
 
 # Ciclo di esecuzione dell'interfaccia Kiosk RDP
-while true; do
+while [ ! -e /run/rdp-kiosk-powering-down ]; do
     /usr/local/bin/rdp-kiosk-ui
+    [ -e /run/rdp-kiosk-powering-down ] && break
     sleep 0.5
 done
 

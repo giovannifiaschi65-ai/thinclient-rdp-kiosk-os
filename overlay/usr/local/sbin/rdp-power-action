@@ -1,0 +1,37 @@
+#!/bin/bash
+# Esegue lo spegnimento o il riavvio immediato e affidabile della postazione Kiosk
+# sia in modalità Live (VirtualBox / Chiavetta USB) sia installata su disco interno.
+
+set -uo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Errore: eseguire come root." >&2
+    exit 1
+fi
+
+ACTION="${1:-}"
+case "$ACTION" in
+    reboot|poweroff) ;;
+    *)
+        echo "Uso: $0 {reboot|poweroff}" >&2
+        exit 2
+        ;;
+esac
+
+# Segnala ai loop Kiosk (kiosk-tty-launcher / kiosk-xsession) di fermarsi subito
+touch /run/rdp-kiosk-powering-down 2>/dev/null || true
+
+sync
+
+# Watchdog di sicurezza in background: se lo shutdown standard dovesse attendere oltre 8s
+# (es. mount Live residui), forza la chiusura pulita ACPI a livello kernel.
+(
+    sleep 8
+    sync
+    /usr/bin/systemctl --force "$ACTION" 2>/dev/null || true
+    sleep 4
+    /usr/bin/systemctl --force --force "$ACTION" 2>/dev/null || true
+) </dev/null >/dev/null 2>&1 &
+
+# Avvia spegnimento/riavvio pulito ignorando eventuali lock di sessione attiva
+exec /usr/bin/systemctl --no-block -i "$ACTION"

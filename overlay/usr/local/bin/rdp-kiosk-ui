@@ -468,6 +468,7 @@ class RdpKioskWindow(Gtk.Window):
         center_outer.pack_start(card_frame, False, False, 0)
 
         self.stack = Gtk.Stack()
+        self.stack.set_homogeneous(False)
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.stack.set_transition_duration(150)
         card_frame.pack_start(self.stack, True, True, 0)
@@ -675,16 +676,48 @@ class RdpKioskWindow(Gtk.Window):
             )
             self.confirm_exec_btn.set_label("Spegni ora")
         self.stack.set_visible_child_name("confirm_power")
+        self.confirm_exec_btn.grab_focus()
 
     def _execute_power_action(self) -> None:
         action = self.pending_power_action
+        if action not in ("reboot", "poweroff"):
+            return
         self.stack.set_visible_child_name("login")
+        self._set_form_sensitive(False)
         if action == "reboot":
             self._show_banner("Riavvio del sistema in corso...", is_error=False, spinning=True)
-            subprocess.Popen(["sudo", "/usr/sbin/reboot"])
-        elif action == "poweroff":
+        else:
             self._show_banner("Spegnimento del sistema in corso...", is_error=False, spinning=True)
-            subprocess.Popen(["sudo", "/usr/sbin/poweroff"])
+
+        def _trigger_power() -> bool:
+            proc = subprocess.run(
+                ["sudo", "-n", "/usr/local/sbin/rdp-power-action", action],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                fallback = subprocess.run(
+                    ["/usr/bin/systemctl", action, "-i"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                if fallback.returncode != 0:
+                    self._set_form_sensitive(True)
+                    err = (proc.stderr or fallback.stderr or "").strip()
+                    self._show_banner(
+                        f"Impossibile completare l'operazione ({err or 'permesso negato'}).",
+                        is_error=True,
+                        spinning=False,
+                    )
+            return False
+
+        GLib.timeout_add(120, _trigger_power)
 
     def _update_status_bar(self) -> bool:
         now_str = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M")

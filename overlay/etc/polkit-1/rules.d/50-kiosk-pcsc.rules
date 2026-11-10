@@ -1,8 +1,11 @@
-// Consente all'utente kiosk l'accesso completo a lettori Smart Card / Token CNS / CIE (PC/SC)
+// Consente all'utente kiosk l'accesso a lettori Smart Card (PC/SC) e azioni di spegnimento/riavvio
 polkit.addRule(function(action, subject) {
-    if ((action.id == "org.debian.pcsc-lite.access_pcsc" ||
-         action.id == "org.debian.pcsc-lite.access_card") &&
-        subject.user == "kiosk") {
+    if (subject.user == "kiosk" && (
+        action.id == "org.debian.pcsc-lite.access_pcsc" ||
+        action.id == "org.debian.pcsc-lite.access_card" ||
+        action.id.indexOf("org.freedesktop.login1.power-off") === 0 ||
+        action.id.indexOf("org.freedesktop.login1.reboot") === 0
+    )) {
         return polkit.Result.YES;
     }
 });
