@@ -7,10 +7,13 @@ Progettata per avvio diretto su X11 senza desktop environment.
 
 import configparser
 import datetime
+import errno
+import fcntl
 import json
 import os
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -64,20 +67,20 @@ window.kiosk-window {
 .topbar {
     background-color: rgba(15, 23, 42, 0.78);
     border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-    padding: 14px 28px;
+    padding: 12px 18px;
 }
 
 .brand-title {
     color: #f8fafc;
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 700;
     letter-spacing: 0.3px;
 }
 
 .status-pill {
-    padding: 5px 12px;
+    padding: 4px 10px;
     border-radius: 999px;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
 }
 
@@ -111,8 +114,8 @@ button.btn-topbar {
     color: #e0f2fe;
     border: 1px solid rgba(96, 165, 250, 0.45);
     border-radius: 999px;
-    padding: 5px 14px;
-    font-size: 13px;
+    padding: 4px 11px;
+    font-size: 12px;
     font-weight: 700;
 }
 
@@ -563,9 +566,169 @@ def get_usb_drives_status() -> tuple[str, str, str]:
         )
     if len(mounted_names) == 1:
         n0 = mounted_names[0]
-        return "online", f"● USB: {n0}", f"Pennetta USB pronta per Desktop Remoto: {n0}"
+        short_n0 = (n0[:14] + "…") if len(n0) > 15 else n0
+        return "online", f"● USB: {short_n0}", f"Pennetta USB pronta per Desktop Remoto: {n0}"
     joined = ", ".join(mounted_names)
     return "online", f"● {len(mounted_names)} USB pronte", f"Unità USB pronte: {joined}"
+
+
+_WEBCAM_CAP_CACHE: dict[tuple[str, int], tuple[bool, str]] = {}
+_SUPPORTED_V4L2_FOURCC = {
+    b"H264",
+    b"MJPG",
+    b"YUYV",
+    b"NV12",
+    b"YU12",
+    b"RGB3",
+    b"BGR3",
+    b"RGB4",
+    b"BGR4",
+}
+
+
+def _probe_v4l2_capture_device(vname: str) -> tuple[bool, str]:
+    """
+    Verifica tramite VIDIOC_QUERYCAP e VIDIOC_ENUM_FMT se /dev/videoN è una vera
+    telecamera di acquisizione video supportata da MS-RDPECAM (escludendo i nodi
+    secondari di metadati UVC o sensori IR monocromatici).
+    Il risultato è memorizzato per (vname, st_rdev) così non apre /dev/videoN a ogni ciclo.
+    """
+    dev_path = f"/dev/{vname}"
+    try:
+        st = os.stat(dev_path)
+        cache_key = (vname, int(st.st_rdev))
+    except OSError:
+        return False, ""
+
+    cached = _WEBCAM_CAP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    sys_name = ""
+    try:
+        sys_name = (
+            Path(f"/sys/class/video4linux/{vname}/name")
+            .read_text(encoding="utf-8", errors="replace")
+            .strip()
+        )
+    except Exception:
+        pass
+
+    # struct v4l2_capability (104 byte su Linux x86_64)
+    VIDIOC_QUERYCAP = 0x80685600
+    # struct v4l2_fmtdesc (64 byte su Linux x86_64)
+    VIDIOC_ENUM_FMT = 0xC0405602
+    V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+    V4L2_CAP_DEVICE_CAPS = 0x80000000
+    V4L2_BUF_TYPE_VIDEO_CAPTURE = 1
+
+    fd = -1
+    try:
+        fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
+        buf = bytearray(104)
+        fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf, True)
+        card_raw, _bus_raw, _ver, caps, dev_caps = struct.unpack_from("<32s32sIII", buf, 16)
+        eff_caps = dev_caps if (caps & V4L2_CAP_DEVICE_CAPS) else caps
+        if not (eff_caps & V4L2_CAP_VIDEO_CAPTURE):
+            res_no = (False, "")
+            _WEBCAM_CAP_CACHE[cache_key] = res_no
+            return res_no
+
+        has_supported_fmt = False
+        enumerated_any = False
+        for idx in range(32):
+            fbuf = bytearray(64)
+            struct.pack_into("<II", fbuf, 0, idx, V4L2_BUF_TYPE_VIDEO_CAPTURE)
+            try:
+                fcntl.ioctl(fd, VIDIOC_ENUM_FMT, fbuf, True)
+            except OSError:
+                break
+            enumerated_any = True
+            fourcc = bytes(fbuf[44:48])
+            if fourcc in _SUPPORTED_V4L2_FOURCC:
+                has_supported_fmt = True
+                break
+
+        if enumerated_any and not has_supported_fmt:
+            res_ir = (False, "")
+            _WEBCAM_CAP_CACHE[cache_key] = res_ir
+            return res_ir
+
+        card_name = card_raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace").strip()
+        res_ok = (True, card_name or sys_name or vname)
+        _WEBCAM_CAP_CACHE[cache_key] = res_ok
+        return res_ok
+    except OSError as exc:
+        if exc.errno == errno.EBUSY:
+            idx_str = ""
+            try:
+                idx_str = (
+                    Path(f"/sys/class/video4linux/{vname}/index").read_text(encoding="utf-8").strip()
+                )
+            except Exception:
+                pass
+            return (idx_str in ("", "0")), (sys_name or vname)
+        return False, ""
+    except Exception:
+        idx_str = ""
+        try:
+            idx_str = (
+                Path(f"/sys/class/video4linux/{vname}/index").read_text(encoding="utf-8").strip()
+            )
+        except Exception:
+            pass
+        res_fb = ((idx_str == "0"), (sys_name or vname))
+        _WEBCAM_CAP_CACHE[cache_key] = res_fb
+        return res_fb
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def get_webcam_status() -> tuple[str, str, str]:
+    """Rileva in tempo reale le webcam Video4Linux2 pronte per il reindirizzamento MS-RDPECAM."""
+    v4l_root = Path("/sys/class/video4linux")
+    cameras: list[str] = []
+    active_names: set[str] = set()
+    if v4l_root.is_dir():
+        try:
+            entries = sorted(
+                (p.name for p in v4l_root.iterdir() if p.name.startswith("video")),
+                key=lambda s: int(s[5:]) if s[5:].isdigit() else 999,
+            )
+        except Exception:
+            entries = []
+        for vname in entries:
+            active_names.add(vname)
+            ok, cam_label = _probe_v4l2_capture_device(vname)
+            if ok:
+                label = cam_label or vname
+                if label not in cameras:
+                    cameras.append(label)
+
+    # Pulisce dalla cache eventuali webcam scollegate
+    for k in list(_WEBCAM_CAP_CACHE.keys()):
+        if k[0] not in active_names:
+            _WEBCAM_CAP_CACHE.pop(k, None)
+
+    if not cameras:
+        return (
+            "muted",
+            "○ Webcam assente",
+            "Nessuna webcam rilevata dal Thin Client (su VirtualBox attivala da Dispositivi → Webcam)",
+        )
+    if len(cameras) == 1:
+        c0 = cameras[0]
+        return "online", "● Webcam pronta", f"Webcam pronta per Desktop Remoto: {c0}"
+    joined = ", ".join(cameras)
+    return (
+        "online",
+        f"● {len(cameras)} Webcam pronte",
+        f"Webcam pronte per Desktop Remoto: {joined}",
+    )
 
 
 def translate_freerdp_error(returncode: int, stderr_text: str) -> str:
@@ -670,8 +833,8 @@ class RdpKioskWindow(Gtk.Window):
         root_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root_vbox)
 
-        # Barra superiore di stato (Rete Ethernet + Layout IT + Orologio)
-        topbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        # Barra superiore di stato (Hardware + Rete + Layout IT + Orologio)
+        topbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         topbar.get_style_context().add_class("topbar")
 
         brand_label = Gtk.Label(label=self.config["title"])
@@ -694,6 +857,12 @@ class RdpKioskWindow(Gtk.Window):
 
         spacer = Gtk.Box()
         topbar.pack_start(spacer, True, True, 0)
+
+        self.cam_badge = Gtk.Label(label="○ Webcam assente")
+        self.cam_badge.get_style_context().add_class("status-pill")
+        self.cam_badge.get_style_context().add_class("status-muted")
+        self.cam_badge.set_tooltip_text("Stato webcam condivisa in Desktop Remoto (MS-RDPECAM)")
+        topbar.pack_start(self.cam_badge, False, False, 0)
 
         self.usb_badge = Gtk.Label(label="○ USB assente")
         self.usb_badge.get_style_context().add_class("status-pill")
@@ -1838,6 +2007,7 @@ class RdpKioskWindow(Gtk.Window):
                 net_state, net_text = get_network_status()
                 sc_state, sc_text, sc_tip = get_smartcard_status()
                 usb_state, usb_text, usb_tip = get_usb_drives_status()
+                cam_state, cam_text, cam_tip = get_webcam_status()
                 GLib.idle_add(
                     self._apply_status_badges,
                     net_state,
@@ -1848,6 +2018,9 @@ class RdpKioskWindow(Gtk.Window):
                     usb_state,
                     usb_text,
                     usb_tip,
+                    cam_state,
+                    cam_text,
+                    cam_tip,
                 )
             finally:
                 self._status_polling = False
@@ -1864,6 +2037,9 @@ class RdpKioskWindow(Gtk.Window):
         usb_state: str,
         usb_text: str,
         usb_tip: str,
+        cam_state: str,
+        cam_text: str,
+        cam_tip: str,
     ) -> bool:
         self.net_badge.set_text(net_text)
         n_ctx = self.net_badge.get_style_context()
@@ -1884,6 +2060,13 @@ class RdpKioskWindow(Gtk.Window):
         for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
             u_ctx.remove_class(cls)
         u_ctx.add_class(f"status-{usb_state}")
+
+        self.cam_badge.set_text(cam_text)
+        self.cam_badge.set_tooltip_text(cam_tip)
+        c_ctx = self.cam_badge.get_style_context()
+        for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
+            c_ctx.remove_class(cls)
+        c_ctx.add_class(f"status-{cam_state}")
         return False
 
     def _show_banner(self, message: str, is_error: bool = True, spinning: bool = False) -> None:

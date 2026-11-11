@@ -252,7 +252,7 @@ apt-get install -y --no-install-recommends \
     libpulse-dev libasound2-dev libcups2-dev libpcsclite-dev libusb-1.0-0-dev libudev-dev
 
 mkdir -p /tmp/freerdp-src
-curl -fsSL "https://github.com/FreeRDP/FreeRDP/releases/download/3.10.3/freerdp-3.10.3.tar.gz" \
+curl -fsSL "https://github.com/FreeRDP/FreeRDP/releases/download/3.33.1/freerdp-3.33.1.tar.gz" \
     | tar -xz -C /tmp/freerdp-src --strip-components=1
 
 cmake -S /tmp/freerdp-src -B /tmp/freerdp-build -G Ninja \
@@ -272,6 +272,8 @@ cmake -S /tmp/freerdp-src -B /tmp/freerdp-build -G Ninja \
     -DWITH_CLIENT_SDL=OFF \
     -DWITH_WAYLAND=OFF \
     -DWITH_FUSE=OFF \
+    -DWITH_RDPECAM_MOVIE=OFF \
+    -DWITH_RDPECAM_GSTREAMER=OFF \
     -DWITH_FFMPEG=ON \
     -DWITH_DSP_FFMPEG=ON \
     -DWITH_SWSCALE=ON \
