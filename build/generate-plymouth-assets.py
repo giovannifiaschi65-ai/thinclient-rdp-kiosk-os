@@ -16,7 +16,7 @@ def draw_rounded_rect(ctx: cairo.Context, x: float, y: float, w: float, h: float
     ctx.close_path()
 
 
-def generate_logo(out_dir: str) -> None:
+def generate_logo(out_dir: str, build_ver: str = "") -> None:
     w, h = 440, 176
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
     ctx = cairo.Context(surf)
@@ -77,10 +77,10 @@ def generate_logo(out_dir: str) -> None:
     ctx.move_to(cx - (ext.width / 2.0 + ext.x_bearing), 132.0)
     ctx.show_text(title)
 
-    # Sottotitolo "POSTAZIONE KIOSK"
+    # Sottotitolo con versione YYMMDDHHMM
     ctx.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
     ctx.set_font_size(12.0)
-    sub = "SISTEMA OPERATIVO KIOSK"
+    sub = f"SISTEMA OPERATIVO KIOSK  •  {build_ver}" if build_ver else "SISTEMA OPERATIVO KIOSK"
     ext_s = ctx.text_extents(sub)
     ctx.set_source_rgba(0.580, 0.639, 0.722, 0.92)  # #94a3b8
     ctx.move_to(cx - (ext_s.width / 2.0 + ext_s.x_bearing), 156.0)
@@ -215,8 +215,9 @@ Plymouth.SetRefreshFunction(refresh_callback);
 
 def main() -> None:
     target_dir = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/plymouth/themes/rdp-kiosk"
+    build_ver = sys.argv[2].strip() if len(sys.argv) > 2 else ""
     os.makedirs(target_dir, exist_ok=True)
-    generate_logo(target_dir)
+    generate_logo(target_dir, build_ver)
     generate_spinner_frames(target_dir, 24)
     generate_caption(target_dir, "msg_boot.png", "Avvio del sistema in corso...")
     generate_caption(target_dir, "msg_shutdown.png", "Spegnimento del sistema in corso...")

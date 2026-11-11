@@ -12,7 +12,8 @@ WORK_DIR="${PROJECT_ROOT}/work"
 CHROOT_DIR="${WORK_DIR}/chroot"
 ISO_DIR="${WORK_DIR}/iso_root"
 OUTPUT_DIR="${PROJECT_ROOT}/output"
-ISO_NAME="${ISO_NAME:-thinclient-rdp-kiosk-amd64.iso}"
+BUILD_VERSION="${BUILD_VERSION:-$(TZ=Europe/Rome date +%y%m%d%H%M)}"
+ISO_NAME="${ISO_NAME:-thinclient-rdp-kiosk-${BUILD_VERSION}.iso}"
 ISO_PATH="${OUTPUT_DIR}/${ISO_NAME}"
 
 DEBIAN_RELEASE="bookworm"
@@ -283,6 +284,11 @@ cp -f "${CHROOT_DIR}/etc/polkit-1/rules.d/50-kiosk-pcsc.rules" "${CHROOT_DIR}/us
 chown root:root "${CHROOT_DIR}/usr/share/polkit-1/rules.d/50-kiosk-pcsc.rules"
 chmod 0644 "${CHROOT_DIR}/usr/share/polkit-1/rules.d/50-kiosk-pcsc.rules"
 
+# Registra la versione YYMMDDHHMM dell'immagine nel filesystem Kiosk
+mkdir -p "${CHROOT_DIR}/etc/rdp-kiosk"
+printf '%s\n' "${BUILD_VERSION}" > "${CHROOT_DIR}/etc/rdp-kiosk/version"
+chmod 0644 "${CHROOT_DIR}/etc/rdp-kiosk/version"
+
 # Permessi rigorosi per eseguibili e sudoers
 mkdir -p "${CHROOT_DIR}/var/lib/rdp-kiosk" "${CHROOT_DIR}/media"
 chmod 0755 \
@@ -363,12 +369,13 @@ EOF
 echo "==> [6/8] Tema animato Plymouth, pulizia Livello 1, servizi systemd e initramfs..."
 cp -f "${PROJECT_ROOT}/build/generate-plymouth-assets.py" "${CHROOT_DIR}/tmp/generate-plymouth-assets.py"
 
-chroot "${CHROOT_DIR}" /bin/bash -eux <<'CHROOT_CFG'
+chroot "${CHROOT_DIR}" /bin/bash -eux -s "${BUILD_VERSION}" <<'CHROOT_CFG'
+BUILD_VER="$1"
 export DEBIAN_FRONTEND=noninteractive
 export XZ_OPT="-6 -T0"
 
 # Genera il tema di avvio animato 'rdp-kiosk' e rimuove i temi campione pesanti di Debian
-python3 /tmp/generate-plymouth-assets.py /usr/share/plymouth/themes/rdp-kiosk
+python3 /tmp/generate-plymouth-assets.py /usr/share/plymouth/themes/rdp-kiosk "${BUILD_VER}"
 rm -f /tmp/generate-plymouth-assets.py
 for unused_theme in homeworld emerald solar spacefun moonlight glow fade-in spinner; do
     rm -rf "/usr/share/plymouth/themes/${unused_theme}"

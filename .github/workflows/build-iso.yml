@@ -22,8 +22,6 @@ on:
     branches:
       - main
       - master
-    tags:
-      - "v*"
 
 permissions:
   contents: write
@@ -38,6 +36,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Calcola versione YYMMDDHHMM (fuso orario Europe/Rome)
+        run: |
+          VER="$(TZ=Europe/Rome date +%y%m%d%H%M)"
+          ISO="thinclient-rdp-kiosk-${VER}.iso"
+          echo "BUILD_VERSION=${VER}" >> "$GITHUB_ENV"
+          echo "ISO_NAME=${ISO}" >> "$GITHUB_ENV"
+          echo "Versione ISO assegnata: ${VER} (${ISO})"
+
       - name: Libera spazio disco opzionale sul runner
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
@@ -45,12 +51,15 @@ jobs:
 
       - name: Installa dipendenze di compilazione ISO
         run: |
+          sudo mkdir -p /etc/systemd/resolved.conf.d
+          printf '[Resolve]\nDNS=1.1.1.1 8.8.8.8\nFallbackDNS=9.9.9.9\n' | sudo tee /etc/systemd/resolved.conf.d/99-public-dns.conf
+          sudo systemctl restart systemd-resolved || true
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list || true
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            printf '%s\n' "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt
+            printf '%s\n' "https://mirrors.edge.kernel.org/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt
           fi
           if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu/|g; s|http://azure.archive.ubuntu.com/ubuntu/|http://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://mirrors.edge.kernel.org/ubuntu/|g; s|http://azure.archive.ubuntu.com/ubuntu/|https://mirrors.edge.kernel.org/ubuntu/|g; s|http://security.ubuntu.com/ubuntu/|https://mirrors.edge.kernel.org/ubuntu/|g; s|https://security.ubuntu.com/ubuntu/|https://mirrors.edge.kernel.org/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
           fi
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
@@ -88,7 +97,7 @@ jobs:
       - name: Verifica preliminare rapida xorriso + EFI snello + tema Cairo
         run: |
           TMP_TEST="$(mktemp -d)"
-          python3 build/generate-plymouth-assets.py "${TMP_TEST}/plymouth"
+          python3 build/generate-plymouth-assets.py "${TMP_TEST}/plymouth" "${BUILD_VERSION}"
           ls -lh "${TMP_TEST}/plymouth"
           mkdir -p "${TMP_TEST}/iso/boot/grub" "${TMP_TEST}/iso/EFI/BOOT"
           echo "set timeout=1" > "${TMP_TEST}/iso/boot/grub/grub.cfg"
@@ -96,7 +105,7 @@ jobs:
           GRUB_EFI_MODS="normal configfile search search_fs_file search_fs_uuid search_label part_gpt part_msdos fat exfat ntfs iso9660 ext2 loopback gzio xzio linux all_video efi_gop efi_uga video_bochs video_cirrus video video_fb gfxterm gfxmenu font png halt reboot test echo true sleep ls cat"
           grub-mkstandalone -O x86_64-efi --modules="${GRUB_EFI_MODS}" --locales="" --themes="" --fonts="unicode" -o "${TMP_TEST}/iso/EFI/BOOT/BOOTX64.EFI" "boot/grub/grub.cfg=${TMP_TEST}/chain.cfg"
           ls -lh "${TMP_TEST}/iso/EFI/BOOT/BOOTX64.EFI"
-          dd if=/dev/zero of="${TMP_TEST}/cfg.img" bs=1M count=4 status=none
+          dd if=/dev/zero of="${TMP_TEST}/cfg.img" bs=1M count=8 status=none
           mkfs.ext4 -F -b 1024 -O ^has_journal,^metadata_csum_seed -L RDPOS_CFG "${TMP_TEST}/cfg.img" >/dev/null
           grub-mkrescue --locales="" --themes="" --fonts="unicode" -o "${TMP_TEST}/test.iso" "${TMP_TEST}/iso" -- \
             -volid "THINCLIENT_RDP" \
@@ -108,29 +117,30 @@ jobs:
         run: |
           sed -i 's/\r$//' build/build-iso.sh
           chmod +x build/build-iso.sh
-          sudo ./build/build-iso.sh
+          sudo BUILD_VERSION="${BUILD_VERSION}" ISO_NAME="${ISO_NAME}" ./build/build-iso.sh
 
       - name: Verifica struttura di avvio BIOS + UEFI dell'ISO
         run: |
           ls -lh output/
-          fdisk -l output/thinclient-rdp-kiosk-amd64.iso
-          xorriso -indev output/thinclient-rdp-kiosk-amd64.iso -report_el_torito plain
+          fdisk -l "output/${ISO_NAME}"
+          xorriso -indev "output/${ISO_NAME}" -report_el_torito plain
 
       - name: Carica Artifact ISO pronto per Rufus / BalenaEtcher
         uses: actions/upload-artifact@v4
         with:
-          name: thinclient-rdp-kiosk-amd64-iso
+          name: thinclient-rdp-kiosk-${{ env.BUILD_VERSION }}-iso
           path: |
-            output/thinclient-rdp-kiosk-amd64.iso
-            output/thinclient-rdp-kiosk-amd64.iso.sha256
+            output/${{ env.ISO_NAME }}
+            output/${{ env.ISO_NAME }}.sha256
           compression-level: 0
           retention-days: 30
 
-      - name: Pubblica GitHub Release (automatico su tag v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Pubblica GitHub Release (${{ env.BUILD_VERSION }})
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.BUILD_VERSION }}
+          name: Thin Client RDP Kiosk — ${{ env.BUILD_VERSION }}
           files: |
-            output/thinclient-rdp-kiosk-amd64.iso
-            output/thinclient-rdp-kiosk-amd64.iso.sha256
+            output/${{ env.ISO_NAME }}
+            output/${{ env.ISO_NAME }}.sha256
           generate_release_notes: true

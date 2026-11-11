@@ -579,6 +579,19 @@ class RdpKioskWindow(Gtk.Window):
         brand_label.set_halign(Gtk.Align.START)
         topbar.pack_start(brand_label, False, False, 0)
 
+        ver_str = ""
+        try:
+            ver_file = Path("/etc/rdp-kiosk/version")
+            if ver_file.is_file():
+                ver_str = ver_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        if ver_str:
+            ver_badge = Gtk.Label(label=f"v.{ver_str}")
+            ver_badge.get_style_context().add_class("kbd-badge")
+            ver_badge.set_tooltip_text(f"Versione immagine Thin Client RDP: {ver_str}")
+            topbar.pack_start(ver_badge, False, False, 0)
+
         spacer = Gtk.Box()
         topbar.pack_start(spacer, True, True, 0)
 
