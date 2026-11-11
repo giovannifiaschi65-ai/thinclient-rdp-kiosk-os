@@ -361,17 +361,51 @@ def load_kiosk_config() -> dict:
     }
 
 
+def _lib_has_rdpecam(bin_path: str) -> bool:
+    """Verifica a livello binario che libfreerdp-client3 collegata a bin_path includa rdpecam_DVCPluginEntry."""
+    candidates = []
+    if bin_path.startswith("/usr/local/"):
+        candidates.extend(
+            [
+                "/usr/local/lib/libfreerdp-client3.so.3",
+                "/usr/local/lib/x86_64-linux-gnu/libfreerdp-client3.so.3",
+            ]
+        )
+    candidates.extend(
+        [
+            "/usr/lib/x86_64-linux-gnu/libfreerdp-client3.so.3",
+            "/usr/local/lib/libfreerdp-client3.so.3",
+        ]
+    )
+    for so_path in candidates:
+        try:
+            if os.path.isfile(so_path):
+                data = Path(so_path).read_bytes()
+                if b"rdpecam_DVCPluginEntry" in data:
+                    return True
+                if bin_path.startswith("/usr/bin/") and so_path.startswith("/usr/lib/"):
+                    break
+        except Exception:
+            pass
+    return False
+
+
 def detect_freerdp() -> tuple[str, bool, bool, bool]:
     """
-    Rileva il binario FreeRDP disponibile e verifica:
+    Rileva il binario FreeRDP disponibile (preferendo /usr/local/bin/xfreerdp3 compilato con MS-RDPECAM)
+    e verifica:
       - se è FreeRDP 3.x (is_v3)
       - se supporta /args-from:stdin (supports_args_from)
       - se supporta il canale webcam MS-RDPECAM (/dvc:rdpecam) (supports_rdpecam)
     """
-    for candidate, is_v3 in (("/usr/bin/xfreerdp3", True), ("/usr/bin/xfreerdp", False)):
+    for candidate, is_v3 in (
+        ("/usr/local/bin/xfreerdp3", True),
+        ("/usr/bin/xfreerdp3", True),
+        ("/usr/bin/xfreerdp", False),
+    ):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             supports_args_from = False
-            supports_rdpecam = False
+            supports_rdpecam = _lib_has_rdpecam(candidate) if is_v3 else False
             try:
                 proc = subprocess.run(
                     [candidate, "--help"],
@@ -384,24 +418,11 @@ def detect_freerdp() -> tuple[str, bool, bool, bool]:
                     supports_args_from = True
             except Exception:
                 pass
-            if is_v3:
-                try:
-                    proc_cfg = subprocess.run(
-                        [candidate, "/buildconfig"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        timeout=4,
-                    )
-                    cfg_out = (proc_cfg.stdout or "").upper()
-                    if "CHANNEL_RDPECAM_CLIENT=ON" in cfg_out or "CHANNEL_RDPECAM=ON" in cfg_out:
-                        supports_rdpecam = True
-                except Exception:
-                    pass
             return candidate, is_v3, supports_args_from, supports_rdpecam
 
     found = shutil.which("xfreerdp3") or shutil.which("xfreerdp") or "/usr/bin/xfreerdp"
-    return found, found.endswith("3"), False, False
+    is_v3 = found.endswith("3")
+    return found, is_v3, False, (_lib_has_rdpecam(found) if is_v3 else False)
 
 
 def get_network_status() -> tuple[str, str]:

@@ -185,6 +185,8 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     libpulse0 \
     alsa-utils \
     libv4l-0 \
+    libv4lconvert0 \
+    libusb-1.0-0 \
     v4l-utils \
     exfatprogs \
     ntfs-3g \
@@ -234,9 +236,78 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     dialog \
     tar
 
-# Installa FreeRDP 3 da bookworm-backports (migliore supporto hotplug Smart Card / USB)
+# Installa FreeRDP 3 da bookworm-backports (dipendenze runtime complete)
 apt-get install -y --no-install-recommends -t bookworm-backports freerdp3-x11 \
     || apt-get install -y --no-install-recommends freerdp2-x11
+
+# Compila xfreerdp3 in /usr/local abilitando esplicitamente il canale Webcam MS-RDPECAM (-DCHANNEL_RDPECAM_CLIENT=ON)
+# (disabilitato nel pacchetto Debian precompilato), rimuovendo poi tutti i compilatori e header -dev per non appesantire la ISO.
+dpkg-query -W -f='${binary:Package}\n' | sort -u > /tmp/pre-freerdp-build.pkgs
+apt-get install -y --no-install-recommends \
+    ca-certificates curl build-essential cmake ninja-build pkg-config \
+    linux-libc-dev libicu-dev libv4l-dev libssl-dev libkrb5-dev zlib1g-dev libcjson-dev liburiparser-dev \
+    libx11-dev libxext-dev libxinerama-dev libxcursor-dev libxkbfile-dev libxv-dev libxi-dev \
+    libxrender-dev libxrandr-dev libxfixes-dev libxdamage-dev \
+    libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
+    libpulse-dev libasound2-dev libcups2-dev libpcsclite-dev libusb-1.0-0-dev libudev-dev
+
+mkdir -p /tmp/freerdp-src
+curl -fsSL "https://github.com/FreeRDP/FreeRDP/releases/download/3.10.3/freerdp-3.10.3.tar.gz" \
+    | tar -xz -C /tmp/freerdp-src --strip-components=1
+
+cmake -S /tmp/freerdp-src -B /tmp/freerdp-build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr/local \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DCMAKE_INSTALL_RPATH="/usr/local/lib" \
+    -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+    -DWITH_BINARY_VERSIONING=ON \
+    -DBUILD_TESTING=OFF \
+    -DWITH_MANPAGES=OFF \
+    -DWITH_SAMPLE=OFF \
+    -DWITH_SERVER=OFF \
+    -DWITH_PLATFORM_SERVER=OFF \
+    -DWITH_SHADOW=OFF \
+    -DWITH_PROXY=OFF \
+    -DWITH_CLIENT_SDL=OFF \
+    -DWITH_WAYLAND=OFF \
+    -DWITH_FUSE=OFF \
+    -DWITH_FFMPEG=ON \
+    -DWITH_DSP_FFMPEG=ON \
+    -DWITH_SWSCALE=ON \
+    -DCHANNEL_RDPECAM=ON \
+    -DCHANNEL_RDPECAM_CLIENT=ON \
+    -DCHANNEL_URBDRC=ON \
+    -DCHANNEL_URBDRC_CLIENT=ON \
+    -DWITH_PULSE=ON \
+    -DWITH_ALSA=ON \
+    -DWITH_CUPS=ON \
+    -DWITH_PCSC=ON \
+    -DWITH_KRB5=ON
+
+ninja -C /tmp/freerdp-build -j"$(nproc)" install
+strip --strip-unneeded /usr/local/bin/xfreerdp3 /usr/local/lib/*.so* 2>/dev/null || true
+rm -rf /usr/local/include /usr/local/lib/cmake /usr/local/lib/pkgconfig /usr/local/share/man /tmp/freerdp-src /tmp/freerdp-build
+ldconfig
+
+# Verifica rigorosa che il canale webcam rdpecam sia compilato nel binario client
+grep -qa "rdpecam_DVCPluginEntry" /usr/local/lib/libfreerdp-client3.so*
+
+# Rimuove tutti i pacchetti temporanei di compilazione (-dev, gcc, cmake, ninja)
+dpkg-query -W -f='${binary:Package}\n' | sort -u > /tmp/post-freerdp-build.pkgs
+BUILD_ONLY_PKGS="$(comm -13 /tmp/pre-freerdp-build.pkgs /tmp/post-freerdp-build.pkgs | tr '\n' ' ')"
+if [ -n "${BUILD_ONLY_PKGS}" ]; then
+    apt-get purge -y --auto-remove ${BUILD_ONLY_PKGS}
+fi
+rm -f /tmp/pre-freerdp-build.pkgs /tmp/post-freerdp-build.pkgs
+ldconfig
+
+# Verifica che nessuna libreria condivisa runtime risulti mancante dopo la pulizia
+if ldd /usr/local/bin/xfreerdp3 /usr/local/lib/libfreerdp-client3.so.3 | grep -q "not found"; then
+    echo "ERRORE: libreria condivisa mancante per /usr/local/bin/xfreerdp3!" >&2
+    ldd /usr/local/bin/xfreerdp3 /usr/local/lib/libfreerdp-client3.so.3 >&2
+    exit 1
+fi
 
 # Driver opzionale aggiuntivo per lettori Reiner SCT cyberJack
 apt-get install -y --no-install-recommends libifd-cyberjack6 || true
