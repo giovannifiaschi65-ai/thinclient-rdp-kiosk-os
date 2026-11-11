@@ -77,14 +77,21 @@ jobs:
             sed -i "s|^default_user =.*|default_user = ${INPUT_USER}|" overlay/etc/rdp-kiosk/kiosk.conf
           fi
 
-      - name: Verifica preliminare rapida xorriso + partizione RDPOS_CFG
+      - name: Verifica preliminare rapida xorriso + EFI snello + tema Cairo
         run: |
+          sudo apt-get install -y python3-cairo
           TMP_TEST="$(mktemp -d)"
-          mkdir -p "${TMP_TEST}/iso/boot/grub"
+          python3 build/generate-plymouth-assets.py "${TMP_TEST}/plymouth"
+          ls -lh "${TMP_TEST}/plymouth"
+          mkdir -p "${TMP_TEST}/iso/boot/grub" "${TMP_TEST}/iso/EFI/BOOT"
           echo "set timeout=1" > "${TMP_TEST}/iso/boot/grub/grub.cfg"
-          dd if=/dev/zero of="${TMP_TEST}/cfg.img" bs=1M count=8 status=none
-          mkfs.ext4 -F -L RDPOS_CFG "${TMP_TEST}/cfg.img" >/dev/null
-          grub-mkrescue -o "${TMP_TEST}/test.iso" "${TMP_TEST}/iso" -- \
+          echo "configfile /boot/grub/grub.cfg" > "${TMP_TEST}/chain.cfg"
+          GRUB_EFI_MODS="normal configfile search search_fs_file search_fs_uuid search_label part_gpt part_msdos fat exfat ntfs iso9660 ext2 loopback gzio xzio linux all_video efi_gop efi_uga video_bochs video_cirrus video video_fb gfxterm gfxmenu font png halt reboot test echo true sleep ls cat"
+          grub-mkstandalone -O x86_64-efi --modules="${GRUB_EFI_MODS}" --locales="" --themes="" --fonts="unicode" -o "${TMP_TEST}/iso/EFI/BOOT/BOOTX64.EFI" "boot/grub/grub.cfg=${TMP_TEST}/chain.cfg"
+          ls -lh "${TMP_TEST}/iso/EFI/BOOT/BOOTX64.EFI"
+          dd if=/dev/zero of="${TMP_TEST}/cfg.img" bs=1M count=4 status=none
+          mkfs.ext4 -F -b 1024 -O ^has_journal,^metadata_csum_seed -L RDPOS_CFG "${TMP_TEST}/cfg.img" >/dev/null
+          grub-mkrescue --locales="" --themes="" --fonts="unicode" -o "${TMP_TEST}/test.iso" "${TMP_TEST}/iso" -- \
             -volid "THINCLIENT_RDP" \
             -append_partition 3 0x83 "${TMP_TEST}/cfg.img"
           fdisk -l "${TMP_TEST}/test.iso"

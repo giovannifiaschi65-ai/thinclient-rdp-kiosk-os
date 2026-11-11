@@ -146,10 +146,10 @@ apt-get install -y --no-install-recommends \
     xserver-xorg-core \
     xserver-xorg \
     xserver-xorg-legacy \
-    xserver-xorg-input-all \
     xserver-xorg-input-libinput \
-    xserver-xorg-video-all \
-    libgl1-mesa-dri \
+    xserver-xorg-video-vesa \
+    xserver-xorg-video-fbdev \
+    xserver-xorg-video-vmware \
     libgbm1 \
     x11-xserver-utils \
     x11-xkb-utils \
@@ -157,11 +157,15 @@ apt-get install -y --no-install-recommends \
     xinit \
     xauth \
     openbox \
+    plymouth \
+    plymouth-themes \
     python3 \
+    python3-cairo \
     python3-gi \
     python3-gi-cairo \
     gir1.2-gtk-3.0 \
     libgtk-3-0 \
+    libgtk-3-bin \
     librsvg2-common \
     adwaita-icon-theme \
     fonts-cantarell \
@@ -305,9 +309,20 @@ NAutoVTs=1
 ReserveVT=1
 EOF
 
-echo "==> [6/8] Creazione utente Kiosk, servizi systemd e generazione initramfs..."
+echo "==> [6/8] Tema animato Plymouth, pulizia Livello 1, servizi systemd e initramfs..."
+cp -f "${PROJECT_ROOT}/build/generate-plymouth-assets.py" "${CHROOT_DIR}/tmp/generate-plymouth-assets.py"
+
 chroot "${CHROOT_DIR}" /bin/bash -eux <<'CHROOT_CFG'
 export DEBIAN_FRONTEND=noninteractive
+export XZ_OPT="-6 -T0"
+
+# Genera il tema di avvio animato 'rdp-kiosk' e rimuove i temi campione pesanti di Debian
+python3 /tmp/generate-plymouth-assets.py /usr/share/plymouth/themes/rdp-kiosk
+rm -f /tmp/generate-plymouth-assets.py
+for unused_theme in homeworld emerald solar spacefun moonlight glow fade-in spinner; do
+    rm -rf "/usr/share/plymouth/themes/${unused_theme}"
+done
+plymouth-set-default-theme rdp-kiosk
 
 # Crea utente non privilegiato 'kiosk' (inclusi gruppi audio, rete e stampa CUPS)
 for grp in plugdev lp lpadmin; do
@@ -343,8 +358,38 @@ systemctl enable rdp-load-config.service
 systemctl set-default multi-user.target
 systemctl mask getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
 
-# Moduli initramfs essenziali per avvio da USB / NVMe / SATA / eMMC (BIOS e UEFI)
+# Ottimizzazione Livello 1: rimuove solo firmware inutilizzabili su Thin Client x86_64 cablato
+# (Wi-Fi/BT, acceleratori AI Data-Center senza video, switch 100GbE enterprise e SoC ARM)
+for fw_root in /lib/firmware /usr/lib/firmware; do
+    [ -d "$fw_root" ] || continue
+    rm -rf \
+        "$fw_root"/iwlwifi* \
+        "$fw_root"/ath10k "$fw_root"/ath11k "$fw_root"/ath12k "$fw_root"/ath9k_htc "$fw_root"/ath6k "$fw_root"/ath3k* \
+        "$fw_root"/brcm "$fw_root"/mediatek "$fw_root"/mrvl "$fw_root"/rtlwifi "$fw_root"/rtw88 "$fw_root"/rtw89 \
+        "$fw_root"/ti-connectivity "$fw_root"/cypress "$fw_root"/qca "$fw_root"/libertas "$fw_root"/mwl8k "$fw_root"/rsi \
+        "$fw_root"/netronome "$fw_root"/mellanox "$fw_root"/liquidio "$fw_root"/qed "$fw_root"/cxgb4 "$fw_root"/bnx2x \
+        "$fw_root"/qcom "$fw_root"/meson "$fw_root"/rockchip "$fw_root"/sunxi "$fw_root"/amphion "$fw_root"/dpaa2 \
+        "$fw_root"/nvidia/*/gsp \
+        "$fw_root"/amdgpu/aldebaran* "$fw_root"/amdgpu/arcturus* "$fw_root"/amdgpu/vega20* \
+        "$fw_root"/amdgpu/gc_9_4* "$fw_root"/amdgpu/sdma_4_4* "$fw_root"/amdgpu/vcn_4_0_3* || true
+done
+
+# Configura initramfs compresso in XZ con supporto framebuffer immediato (BIOS/UEFI/VirtualBox)
+mkdir -p /etc/initramfs-tools/conf-hooks.d
+echo "FRAMEBUFFER=y" > /etc/initramfs-tools/conf-hooks.d/plymouth-fb
+if grep -q '^COMPRESS=' /etc/initramfs-tools/initramfs.conf; then
+    sed -i 's/^COMPRESS=.*/COMPRESS=xz/' /etc/initramfs-tools/initramfs.conf
+else
+    echo "COMPRESS=xz" >> /etc/initramfs-tools/initramfs.conf
+fi
+
+# Moduli initramfs essenziali per grafica boot (VirtualBox/VESA/GOP) e dischi USB/NVMe/SATA/eMMC
 cat >> /etc/initramfs-tools/modules <<'EOF'
+simpledrm
+vboxvideo
+vmwgfx
+virtio_gpu
+bochs
 overlay
 squashfs
 isofs
@@ -368,9 +413,32 @@ sdhci_pci
 sdhci_acpi
 EOF
 
-# Rigenera initramfs con supporto live-boot
+# Rigenera initramfs con supporto live-boot e splash animato Plymouth
 KVER="$(ls -1 /lib/modules | sort -V | tail -n 1)"
 update-initramfs -c -k "${KVER}" || update-initramfs -u -k "${KVER}"
+
+# Ottimizzazione Livello 1: pulizia documentazione, manpages, icone giganti e traduzioni estere
+rm -rf \
+    /usr/share/doc/* \
+    /usr/share/man/* \
+    /usr/share/info/* \
+    /usr/share/groff/* \
+    /usr/share/lintian/* \
+    /usr/share/linda/* \
+    /var/cache/apt/* \
+    /var/cache/debconf/*-old \
+    /var/log/*.log \
+    /usr/share/icons/Adwaita/512x512 \
+    /usr/share/icons/Adwaita/256x256 \
+    /usr/share/icons/Adwaita/96x96 || true
+
+if [ -d /usr/share/locale ]; then
+    find /usr/share/locale -mindepth 1 -maxdepth 1 \
+        ! -name 'it' ! -name 'it_*' ! -name 'en' ! -name 'en_*' ! -name 'locale.alias' \
+        -exec rm -rf {} +
+fi
+
+gtk-update-icon-cache -f -q /usr/share/icons/Adwaita || true
 CHROOT_CFG
 
 # Rimuove policy-rc.d temporaneo e prepara resolv.conf / machine-id puliti per il Live boot
@@ -406,28 +474,40 @@ mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" \
 chmod 0644 "${ISO_DIR}/live/filesystem.squashfs"
 
 echo "==> [8/8] Generazione immagine ISO ibrida BIOS + UEFI (compatibile Rufus ISO/DD e BalenaEtcher)..."
-# Prepara anche EFI standalone in /EFI/BOOT per piena compatibilità con Rufus in modalità ISO (FAT32)
+# Prepara anche EFI standalone snello in /EFI/BOOT per piena compatibilità con Rufus in modalità ISO (FAT32)
 mkdir -p "${ISO_DIR}/EFI/BOOT"
 cat > "${WORK_DIR}/efi-chain.cfg" <<'EOF'
 search --no-floppy --set=root --file /boot/grub/grub.cfg
 configfile /boot/grub/grub.cfg
 EOF
+GRUB_EFI_MODS="normal configfile search search_fs_file search_fs_uuid search_label part_gpt part_msdos fat exfat ntfs iso9660 ext2 loopback gzio xzio linux all_video efi_gop efi_uga video_bochs video_cirrus video video_fb gfxterm gfxmenu font png halt reboot test echo true sleep ls cat"
 grub-mkstandalone \
     -O x86_64-efi \
+    --modules="${GRUB_EFI_MODS}" \
+    --locales="" \
+    --themes="" \
+    --fonts="unicode" \
     -o "${ISO_DIR}/EFI/BOOT/BOOTX64.EFI" \
     "boot/grub/grub.cfg=${WORK_DIR}/efi-chain.cfg"
 grub-mkstandalone \
     -O i386-efi \
+    --modules="${GRUB_EFI_MODS}" \
+    --locales="" \
+    --themes="" \
+    --fonts="unicode" \
     -o "${ISO_DIR}/EFI/BOOT/BOOTIA32.EFI" \
     "boot/grub/grub.cfg=${WORK_DIR}/efi-chain.cfg" || true
 
-# Crea partizione persistente dedicata RDPOS_CFG (16 MiB ext4) integrata nell'ISO
+# Crea partizione persistente compatta RDPOS_CFG (4 MiB ext4 senza journal) integrata nell'ISO
 # per salvare IP, Dominio e Utente anche su chiavette Rufus in modalità DD e BalenaEtcher
 CFG_IMG="${WORK_DIR}/rdpos_cfg.img"
-dd if=/dev/zero of="${CFG_IMG}" bs=1M count=16 status=none
-mkfs.ext4 -F -O ^metadata_csum_seed -L RDPOS_CFG "${CFG_IMG}" >/dev/null
+dd if=/dev/zero of="${CFG_IMG}" bs=1M count=4 status=none
+mkfs.ext4 -F -b 1024 -O ^has_journal,^metadata_csum_seed -L RDPOS_CFG "${CFG_IMG}" >/dev/null
 
 grub-mkrescue \
+    --locales="" \
+    --themes="" \
+    --fonts="unicode" \
     -o "${ISO_PATH}" \
     "${ISO_DIR}" \
     -- \

@@ -276,18 +276,27 @@ set timeout_style=hidden
 
 insmod all_video
 insmod gfxterm
+insmod font
 insmod part_gpt
 insmod ext2
 
+if loadfont /boot/grub/fonts/unicode.pf2 ; then
+    set gfxmode=1024x768x32,auto
+    set gfxpayload=keep
+    terminal_output gfxterm
+fi
+
 menuentry "Thin Client RDP Kiosk" {
+    set gfxpayload=keep
     search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
-    linux /boot/vmlinuz boot=live components noeject quiet loglevel=3 live-media=/dev/disk/by-uuid/${ROOT_UUID} locales=it_IT.UTF-8 keyboard-layouts=it timezone=Europe/Rome
+    linux /boot/vmlinuz boot=live components noeject quiet splash plymouth.ignore-serial-consoles vt.global_cursor_default=0 loglevel=3 live-media=/dev/disk/by-uuid/${ROOT_UUID} locales=it_IT.UTF-8 keyboard-layouts=it timezone=Europe/Rome
     initrd /boot/initrd.img
 }
 
 menuentry "Thin Client RDP Kiosk (Compatibilita Video - nomodeset)" {
+    set gfxpayload=keep
     search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
-    linux /boot/vmlinuz boot=live components noeject quiet nomodeset live-media=/dev/disk/by-uuid/${ROOT_UUID} locales=it_IT.UTF-8 keyboard-layouts=it timezone=Europe/Rome
+    linux /boot/vmlinuz boot=live components noeject quiet splash plymouth.ignore-serial-consoles vt.global_cursor_default=0 nomodeset live-media=/dev/disk/by-uuid/${ROOT_UUID} locales=it_IT.UTF-8 keyboard-layouts=it timezone=Europe/Rome
     initrd /boot/initrd.img
 }
 EOF

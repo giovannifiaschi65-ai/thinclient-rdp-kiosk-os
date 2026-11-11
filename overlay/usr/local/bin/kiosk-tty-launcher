@@ -12,6 +12,7 @@ fi
 
 # Modalità Installazione su Disco Interno (selezionata da menu GRUB)
 if grep -qw "rdp.install=1" /proc/cmdline; then
+    sudo -n /usr/bin/plymouth quit 2>/dev/null || true
     clear
     sudo /usr/local/sbin/rdp-install-disk
     echo "Riavvio del sistema in corso..."
@@ -22,6 +23,7 @@ fi
 
 # Modalità Kiosk Grafica (ciclo continuo anti-crash, zero shell)
 while [ ! -e /run/rdp-kiosk-powering-down ]; do
+    sudo -n /usr/bin/plymouth quit 2>/dev/null || true
     clear
     startx /usr/local/bin/kiosk-xsession -- vt1 -keeptty >/tmp/kiosk-xorg.log 2>&1
     [ -e /run/rdp-kiosk-powering-down ] && break
