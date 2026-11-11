@@ -1,2 +1,5 @@
-# Automount chiavette e dischi esterni USB in /media per condivisione FreeRDP (/drive:hotplug,*)
-KERNEL=="sd[a-z]*", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", ACTION=="add", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-usb-mount@%k.service"
+# Automount chiavette, dischi esterni USB (USB 1.1/2.0/3.0 UAS e passthrough VirtualBox) e schede SD in /media
+KERNEL=="sd[a-z]*", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", ACTION=="add|change", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-usb-mount@%k.service"
+KERNEL=="sd[a-z]*", SUBSYSTEM=="block", ENV{ID_PATH}=="*-usb-*", ENV{ID_FS_USAGE}=="filesystem", ACTION=="add|change", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-usb-mount@%k.service"
+KERNEL=="sd[a-z]*", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ENV{ID_FS_USAGE}=="filesystem", ACTION=="add|change", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-usb-mount@%k.service"
+KERNEL=="mmcblk[0-9]*p[0-9]*", SUBSYSTEM=="block", ENV{ID_FS_USAGE}=="filesystem", ACTION=="add|change", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kiosk-usb-mount@%k.service"

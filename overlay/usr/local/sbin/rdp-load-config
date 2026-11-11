@@ -83,4 +83,9 @@ if [ "$BT_RESTORED" -eq 1 ] && systemctl is-active --quiet bluetooth.service 2>/
     systemctl restart bluetooth.service 2>/dev/null || true
 fi
 
+# Monta eventuali chiavette USB già inserite prima dell'avvio
+if [ -x /usr/local/sbin/kiosk-usb-mount ]; then
+    /usr/local/sbin/kiosk-usb-mount scan 2>/dev/null || true
+fi
+
 exit 0

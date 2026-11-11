@@ -184,6 +184,8 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     pulseaudio \
     libpulse0 \
     alsa-utils \
+    libv4l-0 \
+    v4l-utils \
     exfatprogs \
     ntfs-3g \
     cups \
@@ -327,6 +329,7 @@ needs_root_rights=auto
 EOF
 
 # Verifica sintassi script e configurazione sudoers nel chroot
+chroot "${CHROOT_DIR}" /usr/bin/xfreerdp3 /buildconfig | tr ' ' '\n' | grep -Ei 'RDPECAM|RDPDR|URBDRC|PULSE|ALSA|FFMPEG|SWSCALE' || true
 chroot "${CHROOT_DIR}" /usr/sbin/visudo -cf /etc/sudoers.d/kiosk-power
 chroot "${CHROOT_DIR}" /usr/bin/python3 -m py_compile \
     /usr/local/bin/rdp-kiosk-ui \
@@ -460,12 +463,16 @@ ext4
 nls_cp437
 nls_iso8859-1
 nls_ascii
+nls_utf8
 usb_storage
 uas
 xhci_hcd
 xhci_pci
 ehci_hcd
 ehci_pci
+ohci_hcd
+ohci_pci
+uhci_hcd
 ahci
 sd_mod
 nvme

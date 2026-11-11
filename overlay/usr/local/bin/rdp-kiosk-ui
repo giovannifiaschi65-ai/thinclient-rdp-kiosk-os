@@ -351,19 +351,27 @@ def load_kiosk_config() -> dict:
         "enable_smartcard": _parse_bool(
             section.get("enable_smartcard", "true"), default=True
         ),
+        "enable_webcam": _parse_bool(
+            section.get("enable_webcam", "true"), default=True
+        ),
+        "enable_microphone": _parse_bool(
+            section.get("enable_microphone", "true"), default=True
+        ),
         "extra_freerdp_args": section.get("extra_freerdp_args", "").strip(),
     }
 
 
-def detect_freerdp() -> tuple[str, bool, bool]:
+def detect_freerdp() -> tuple[str, bool, bool, bool]:
     """
     Rileva il binario FreeRDP disponibile e verifica:
       - se è FreeRDP 3.x (is_v3)
       - se supporta /args-from:stdin (supports_args_from)
+      - se supporta il canale webcam MS-RDPECAM (/dvc:rdpecam) (supports_rdpecam)
     """
     for candidate, is_v3 in (("/usr/bin/xfreerdp3", True), ("/usr/bin/xfreerdp", False)):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             supports_args_from = False
+            supports_rdpecam = False
             try:
                 proc = subprocess.run(
                     [candidate, "--help"],
@@ -376,10 +384,24 @@ def detect_freerdp() -> tuple[str, bool, bool]:
                     supports_args_from = True
             except Exception:
                 pass
-            return candidate, is_v3, supports_args_from
+            if is_v3:
+                try:
+                    proc_cfg = subprocess.run(
+                        [candidate, "/buildconfig"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        timeout=4,
+                    )
+                    cfg_out = (proc_cfg.stdout or "").upper()
+                    if "CHANNEL_RDPECAM_CLIENT=ON" in cfg_out or "CHANNEL_RDPECAM=ON" in cfg_out:
+                        supports_rdpecam = True
+                except Exception:
+                    pass
+            return candidate, is_v3, supports_args_from, supports_rdpecam
 
     found = shutil.which("xfreerdp3") or shutil.which("xfreerdp") or "/usr/bin/xfreerdp"
-    return found, found.endswith("3"), False
+    return found, found.endswith("3"), False, False
 
 
 def get_network_status() -> tuple[str, str]:
@@ -480,6 +502,51 @@ def get_smartcard_status() -> tuple[str, str, str]:
         return "muted", "○ Smart Card assente", "Servizio Smart Card pronto"
 
 
+def get_block_devices_signature() -> tuple[str, ...]:
+    """Firma leggera delle partizioni/dischi rimovibili presenti in /sys/block."""
+    items: list[str] = []
+    try:
+        for bname in os.listdir("/sys/block"):
+            if not (bname.startswith("sd") or bname.startswith("mmcblk")):
+                continue
+            items.append(bname)
+            bdir = f"/sys/block/{bname}"
+            for sub in os.listdir(bdir):
+                if sub.startswith(bname):
+                    items.append(sub)
+    except Exception:
+        pass
+    return tuple(sorted(items))
+
+
+def get_usb_drives_status() -> tuple[str, str, str]:
+    """Legge da /proc/mounts le chiavette/dischi USB montati in /media/*."""
+    mounted_names: list[str] = []
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].startswith("/media/"):
+                    mp = parts[1].replace("\\040", " ")
+                    name = mp.split("/media/", 1)[1].strip("/")
+                    if name and "/" not in name and name not in mounted_names:
+                        mounted_names.append(name)
+    except Exception:
+        pass
+
+    if not mounted_names:
+        return (
+            "muted",
+            "○ USB assente",
+            "Nessuna pennetta USB montata (su VirtualBox attivala da Dispositivi → USB)",
+        )
+    if len(mounted_names) == 1:
+        n0 = mounted_names[0]
+        return "online", f"● USB: {n0}", f"Pennetta USB pronta per Desktop Remoto: {n0}"
+    joined = ", ".join(mounted_names)
+    return "online", f"● {len(mounted_names)} USB pronte", f"Unità USB pronte: {joined}"
+
+
 def translate_freerdp_error(returncode: int, stderr_text: str) -> str:
     text = (stderr_text or "").upper()
     if returncode == 5 or "REPLACED_BY_OTHER_CONNECTION" in text:
@@ -522,10 +589,17 @@ class RdpKioskWindow(Gtk.Window):
     def __init__(self) -> None:
         super().__init__(title="Thin Client RDP Kiosk")
         self.config = load_kiosk_config()
-        self.freerdp_bin, self.freerdp_v3, self.supports_args_from = detect_freerdp()
+        (
+            self.freerdp_bin,
+            self.freerdp_v3,
+            self.supports_args_from,
+            self.supports_rdpecam,
+        ) = detect_freerdp()
         self.connecting = False
         self.pending_power_action = None
         self._status_polling = False
+        self._usb_scanning = False
+        self._last_block_sig: tuple[str, ...] = ()
         self.net_mode = "ethernet"
         self.eth_devices: list[dict] = []
         self.wifi_devices: list[dict] = []
@@ -599,6 +673,12 @@ class RdpKioskWindow(Gtk.Window):
 
         spacer = Gtk.Box()
         topbar.pack_start(spacer, True, True, 0)
+
+        self.usb_badge = Gtk.Label(label="○ USB assente")
+        self.usb_badge.get_style_context().add_class("status-pill")
+        self.usb_badge.get_style_context().add_class("status-muted")
+        self.usb_badge.set_tooltip_text("Stato pennette e dischi esterni USB condivisi in RDP")
+        topbar.pack_start(self.usb_badge, False, False, 0)
 
         self.sc_badge = Gtk.Label(label="○ Smart Card assente")
         self.sc_badge.get_style_context().add_class("status-pill")
@@ -1701,6 +1781,28 @@ class RdpKioskWindow(Gtk.Window):
     def _update_status_bar(self) -> bool:
         now_str = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M")
         self.clock_label.set_text(now_str)
+        cur_sig = get_block_devices_signature()
+        if cur_sig != self._last_block_sig and not self._usb_scanning:
+            self._last_block_sig = cur_sig
+            self._usb_scanning = True
+
+            def _scan_usb_bg() -> None:
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "/usr/local/sbin/kiosk-usb-mount", "scan"],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=8,
+                        check=False,
+                    )
+                finally:
+                    self._usb_scanning = False
+                    if not self.connecting:
+                        GLib.idle_add(lambda: self._trigger_status_poll() or False)
+
+            threading.Thread(target=_scan_usb_bg, daemon=True).start()
+
         if not self.connecting:
             self._trigger_status_poll()
         return True
@@ -1714,14 +1816,33 @@ class RdpKioskWindow(Gtk.Window):
             try:
                 net_state, net_text = get_network_status()
                 sc_state, sc_text, sc_tip = get_smartcard_status()
-                GLib.idle_add(self._apply_status_badges, net_state, net_text, sc_state, sc_text, sc_tip)
+                usb_state, usb_text, usb_tip = get_usb_drives_status()
+                GLib.idle_add(
+                    self._apply_status_badges,
+                    net_state,
+                    net_text,
+                    sc_state,
+                    sc_text,
+                    sc_tip,
+                    usb_state,
+                    usb_text,
+                    usb_tip,
+                )
             finally:
                 self._status_polling = False
 
         threading.Thread(target=_poll_worker, daemon=True).start()
 
     def _apply_status_badges(
-        self, net_state: str, net_text: str, sc_state: str, sc_text: str, sc_tip: str
+        self,
+        net_state: str,
+        net_text: str,
+        sc_state: str,
+        sc_text: str,
+        sc_tip: str,
+        usb_state: str,
+        usb_text: str,
+        usb_tip: str,
     ) -> bool:
         self.net_badge.set_text(net_text)
         n_ctx = self.net_badge.get_style_context()
@@ -1735,6 +1856,13 @@ class RdpKioskWindow(Gtk.Window):
         for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
             s_ctx.remove_class(cls)
         s_ctx.add_class(f"status-{sc_state}")
+
+        self.usb_badge.set_text(usb_text)
+        self.usb_badge.set_tooltip_text(usb_tip)
+        u_ctx = self.usb_badge.get_style_context()
+        for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
+            u_ctx.remove_class(cls)
+        u_ctx.add_class(f"status-{usb_state}")
         return False
 
     def _show_banner(self, message: str, is_error: bool = True, spinning: bool = False) -> None:
@@ -1952,6 +2080,10 @@ class RdpKioskWindow(Gtk.Window):
         if domain:
             args.insert(2, f"/d:{domain}")
 
+        if self.config.get("enable_microphone", True):
+            args.append("/microphone")
+        if self.config.get("enable_webcam", True) and self.supports_rdpecam:
+            args.append("/dvc:rdpecam")
         if self.config.get("enable_usb_drives", True):
             args.append("/drive:hotplug,*")
         if self.config.get("enable_printers", True):
@@ -1984,6 +2116,18 @@ class RdpKioskWindow(Gtk.Window):
         self, server: str, domain: str, username: str, password: str
     ) -> None:
         self._persist_target_on_disk(server, domain, username)
+        if self.config.get("enable_usb_drives", True):
+            try:
+                subprocess.run(
+                    ["sudo", "-n", "/usr/local/sbin/kiosk-usb-mount", "scan"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=8,
+                    check=False,
+                )
+            except Exception:
+                pass
         if self.config.get("enable_printers", True):
             try:
                 subprocess.run(

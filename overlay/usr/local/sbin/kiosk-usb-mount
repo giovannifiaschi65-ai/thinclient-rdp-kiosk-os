@@ -1,19 +1,169 @@
 #!/bin/bash
 # Gestore automount sicuro per chiavette e dischi esterni USB in /media/<nome>
-# Esclude automaticamente il dispositivo di avvio del Thin Client OS.
+# Supporta USB 1.1/2.0/3.0 (usb-storage + UAS), passthrough VirtualBox e schede SD,
+# escludendo automaticamente il disco di avvio del sistema Thin Client OS.
 
 set -uo pipefail
 
 ACTION="${1:-}"
 DEVNAME="${2:-}"
 
+mkdir -p /media
+chmod 0755 /media 2>/dev/null || true
+
+# Determina l'eventuale disco fisico da cui è avviato il sistema Live/Installato
+get_boot_disk() {
+    local src=""
+    for mp in /run/live/medium /lib/live/mount/medium; do
+        if mountpoint -q "$mp" 2>/dev/null; then
+            src="$(findmnt -rn -o SOURCE "$mp" 2>/dev/null | head -n1 || true)"
+            break
+        fi
+    done
+    if [ -n "$src" ] && [ -b "$src" ]; then
+        local pk
+        pk="$(lsblk -no PKNAME "$src" 2>/dev/null | head -n1 || true)"
+        if [ -n "$pk" ]; then
+            echo "/dev/${pk}"
+            return
+        fi
+        echo "$src"
+    fi
+}
+
+cleanup_stale_mounts() {
+    for d in /media/*; do
+        [ -d "$d" ] || continue
+        if ! mountpoint -q "$d" 2>/dev/null; then
+            rmdir "$d" 2>/dev/null || true
+        else
+            # Verifica che il dispositivo sottostante esista ancora (rimozione improvvisa USB)
+            local src
+            src="$(findmnt -rn -o SOURCE "$d" 2>/dev/null | head -n1 || true)"
+            if [ -n "$src" ] && [ ! -e "$src" ]; then
+                umount -lf "$d" 2>/dev/null || true
+                rmdir "$d" 2>/dev/null || true
+            fi
+        fi
+    done
+}
+
+mount_one_device() {
+    local dev_short="$1"
+    local devpath="/dev/${dev_short}"
+    [ -b "$devpath" ] || return 0
+
+    # Ignora se è il disco intero e contiene già partizioni figlie (es. sdb quando esiste sdb1)
+    local child_parts
+    child_parts="$(lsblk -ln -o NAME,TYPE "$devpath" 2>/dev/null | awk '$2=="part"{print $1}' || true)"
+    if [ -n "$child_parts" ] && [ "$(lsblk -dn -o TYPE "$devpath" 2>/dev/null || true)" = "disk" ]; then
+        return 0
+    fi
+
+    # Ignora qualsiasi partizione appartenente al disco di avvio del Thin Client OS
+    local boot_disk parent_name
+    boot_disk="$(get_boot_disk)"
+    parent_name="$(lsblk -no PKNAME "$devpath" 2>/dev/null | head -n1 || true)"
+    if [ -n "$boot_disk" ]; then
+        if [ "$devpath" = "$boot_disk" ] || [ "/dev/${parent_name}" = "$boot_disk" ]; then
+            return 0
+        fi
+    fi
+
+    # Ignora se già montato altrove
+    if findmnt -rn -S "$devpath" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local fs_label="" fs_type=""
+    for _try in 1 2 3 4; do
+        fs_type="$(blkid -s TYPE -o value "$devpath" 2>/dev/null || true)"
+        [ -n "$fs_type" ] && break
+        sleep 0.4
+    done
+    fs_label="$(blkid -s LABEL -o value "$devpath" 2>/dev/null || true)"
+
+    case "$fs_label" in
+        RDPOS_ROOT|RDPOS_EFI|RDPOS_CFG|THINCLIENT_RDP|persistence)
+            return 0
+            ;;
+    esac
+
+    [ -n "$fs_type" ] || return 0
+    case "$fs_type" in
+        swap|squashfs|iso9660|udf|linux_raid_member|LVM2_member)
+            return 0
+            ;;
+    esac
+
+    local safe_label
+    safe_label="$(printf '%s' "$fs_label" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')"
+    if [ -z "$safe_label" ]; then
+        safe_label="USB_${dev_short}"
+    fi
+
+    local mount_dir="/media/${safe_label}"
+    if mountpoint -q "$mount_dir" 2>/dev/null; then
+        mount_dir="/media/${safe_label}_${dev_short}"
+    fi
+    mkdir -p "$mount_dir"
+
+    local kuid kgid mount_ok=0
+    kuid="$(id -u kiosk 2>/dev/null || echo 1000)"
+    kgid="$(id -g kiosk 2>/dev/null || echo 1000)"
+
+    case "$fs_type" in
+        vfat|fat|msdos)
+            mount -t vfat -o "rw,nosuid,nodev,noexec,relatime,uid=${kuid},gid=${kgid},fmask=0022,dmask=0022,utf8,shortname=mixed,flush" "$devpath" "$mount_dir" 2>/dev/null && mount_ok=1
+            if [ "$mount_ok" -ne 1 ]; then
+                mount -t vfat -o "rw,nosuid,nodev,noexec,uid=${kuid},gid=${kgid},fmask=0022,dmask=0022" "$devpath" "$mount_dir" 2>/dev/null && mount_ok=1
+            fi
+            ;;
+        exfat)
+            mount -t exfat -o "rw,nosuid,nodev,noexec,relatime,uid=${kuid},gid=${kgid},fmask=0022,dmask=0022,iocharset=utf8" "$devpath" "$mount_dir" 2>/dev/null && mount_ok=1
+            if [ "$mount_ok" -ne 1 ]; then
+                mount -t exfat -o "rw,nosuid,nodev,noexec,uid=${kuid},gid=${kgid},fmask=0022,dmask=0022" "$devpath" "$mount_dir" 2>/dev/null && mount_ok=1
+            fi
+            ;;
+        ntfs)
+            if command -v ntfs-3g >/dev/null 2>&1; then
+                ntfs-3g -o "rw,nosuid,nodev,noexec,uid=${kuid},gid=${kgid},umask=0022,big_writes" "$devpath" "$mount_dir" 2>/dev/null && mount_ok=1
+            fi
+            if [ "$mount_ok" -ne 1 ]; then
+                mount -o "rw,nosuid,nodev,noexec,uid=${kuid},gid=${kgid},umask=0022" "$devpath" "$mount_dir" 2>/dev/null && mount_ok=1
+            fi
+            ;;
+        *)
+            mount -o "rw,nosuid,nodev,relatime" "$devpath" "$mount_dir" 2>/dev/null && mount_ok=1
+            if [ "$mount_ok" -eq 1 ]; then
+                chmod a+rwx "$mount_dir" 2>/dev/null || true
+            fi
+            ;;
+    esac
+
+    if [ "$mount_ok" -ne 1 ]; then
+        rmdir "$mount_dir" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+if [ "$ACTION" = "scan" ]; then
+    cleanup_stale_mounts
+    while read -r kname; do
+        [ -n "$kname" ] || continue
+        syspath="$(udevadm info -q path -n "/dev/${kname}" 2>/dev/null || true)"
+        if echo "$syspath" | grep -Eq '/usb[0-9]+/|/mmc_host/'; then
+            mount_one_device "$kname" || true
+        fi
+    done < <(lsblk -rn -o KNAME,TYPE 2>/dev/null | awk '$2=="part" || $2=="disk" {print $1}' || true)
+    exit 0
+fi
+
 [ -n "$DEVNAME" ] || exit 0
 DEVPATH="/dev/${DEVNAME}"
 
-mkdir -p /media
-
 if [ "$ACTION" = "remove" ]; then
-    # Smonta eventuali punti di mount in /media associati al dispositivo rimosso
     while read -r mp; do
         [ -n "$mp" ] || continue
         case "$mp" in
@@ -24,72 +174,14 @@ if [ "$ACTION" = "remove" ]; then
                 ;;
         esac
     done < <(findmnt -rn -S "$DEVPATH" -o TARGET 2>/dev/null || true)
+    cleanup_stale_mounts
     exit 0
 fi
 
-[ "$ACTION" = "add" ] || exit 0
-[ -b "$DEVPATH" ] || exit 0
-
-# Ignora se già montato altrove (es. chiavetta di avvio Live su /run/live/medium)
-if findmnt -rn -S "$DEVPATH" >/dev/null 2>&1; then
-    exit 0
-fi
-
-# Esclude le partizioni riservate del sistema operativo Thin Client
-FS_LABEL="$(blkid -s LABEL -o value "$DEVPATH" 2>/dev/null || true)"
-FS_TYPE="$(blkid -s TYPE -o value "$DEVPATH" 2>/dev/null || true)"
-
-case "$FS_LABEL" in
-    RDPOS_ROOT|RDPOS_EFI|RDPOS_CFG|THINCLIENT_RDP)
-        exit 0
-        ;;
-esac
-
-[ -n "$FS_TYPE" ] || exit 0
-case "$FS_TYPE" in
-    swap|squashfs|iso9660|udf|linux_raid_member|LVM2_member)
-        exit 0
-        ;;
-esac
-
-# Costruisce un nome cartella pulito in /media/
-SAFE_LABEL="$(printf '%s' "$FS_LABEL" | tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//;s/_$//')"
-if [ -z "$SAFE_LABEL" ]; then
-    SAFE_LABEL="USB_${DEVNAME}"
-fi
-
-MOUNT_DIR="/media/${SAFE_LABEL}"
-if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
-    MOUNT_DIR="/media/${SAFE_LABEL}_${DEVNAME}"
-fi
-mkdir -p "$MOUNT_DIR"
-
-KUID="$(id -u kiosk 2>/dev/null || echo 1000)"
-KGID="$(id -g kiosk 2>/dev/null || echo 1000)"
-
-MOUNT_OK=0
-case "$FS_TYPE" in
-    vfat|fat|msdos)
-        mount -t vfat -o "rw,nosuid,nodev,noexec,relatime,uid=${KUID},gid=${KGID},fmask=0022,dmask=0022,iocharset=utf8,shortname=mixed,flush" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
-        ;;
-    exfat)
-        mount -t exfat -o "rw,nosuid,nodev,noexec,relatime,uid=${KUID},gid=${KGID},fmask=0022,dmask=0022,iocharset=utf8" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
-        ;;
-    ntfs)
-        if command -v ntfs-3g >/dev/null 2>&1; then
-            ntfs-3g -o "rw,nosuid,nodev,noexec,uid=${KUID},gid=${KGID},umask=0022,big_writes" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
-        else
-            mount -o "rw,nosuid,nodev,noexec,uid=${KUID},gid=${KGID},umask=0022" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
-        fi
-        ;;
-    *)
-        mount -o "rw,nosuid,nodev,relatime" "$DEVPATH" "$MOUNT_DIR" && MOUNT_OK=1
-        ;;
-esac
-
-if [ "$MOUNT_OK" -ne 1 ]; then
-    rmdir "$MOUNT_DIR" 2>/dev/null || true
-    exit 1
+if [ "$ACTION" = "add" ]; then
+    cleanup_stale_mounts
+    mount_one_device "$DEVNAME"
+    exit $?
 fi
 
 exit 0

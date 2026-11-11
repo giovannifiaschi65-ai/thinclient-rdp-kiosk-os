@@ -37,9 +37,21 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-launch >/dev/null 2
     eval "$(dbus-launch --sh-syntax --exit-with-session)"
 fi
 
-# Avvia PulseAudio in background per il reindirizzamento audio RDP
+# Avvia PulseAudio in background per il reindirizzamento audio e microfono RDP
 if command -v pulseaudio >/dev/null 2>&1; then
     pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+fi
+
+# Attiva e alza a livello ottimale uscita audio e microfono predefiniti (ALSA / PulseAudio)
+if command -v amixer >/dev/null 2>&1; then
+    amixer -q sset Master 85% unmute 2>/dev/null || true
+    amixer -q sset Capture 85% cap 2>/dev/null || true
+    amixer -q sset Mic 85% unmute cap 2>/dev/null || true
+fi
+if command -v pactl >/dev/null 2>&1; then
+    pactl set-sink-mute @DEFAULT_SINK@ 0 2>/dev/null || true
+    pactl set-source-mute @DEFAULT_SOURCE@ 0 2>/dev/null || true
+    pactl set-source-volume @DEFAULT_SOURCE@ 85% 2>/dev/null || true
 fi
 
 # Avvia window manager minimale Openbox (senza decorazioni né scorciatoie)
