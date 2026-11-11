@@ -136,7 +136,6 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     firmware-iwlwifi \
     firmware-atheros \
     firmware-brcm80211 \
-    firmware-mediatek \
     firmware-amd-graphics \
     network-manager \
     wpasupplicant \
