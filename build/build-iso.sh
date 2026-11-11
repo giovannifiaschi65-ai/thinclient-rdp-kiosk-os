@@ -112,9 +112,9 @@ export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NONINTERACTIVE_SEEN=true
 export LC_ALL=C
 
-apt-get update
+apt-get -o Acquire::Retries=5 update
 
-apt-get install -y --no-install-recommends \
+apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     linux-image-amd64 \
     live-boot \
     live-boot-initramfs-tools \
