@@ -1,8 +1,9 @@
-// Consente all'utente kiosk l'accesso a lettori Smart Card (PC/SC), gestione Rete/Wi-Fi e spegnimento/riavvio
+// Consente all'utente kiosk l'accesso a lettori Smart Card (PC/SC), Rete/Wi-Fi, Bluetooth e spegnimento/riavvio
 polkit.addRule(function(action, subject) {
     if (subject.user == "kiosk" && (
         action.id.indexOf("org.debian.pcsc-lite.") === 0 ||
         action.id.indexOf("org.freedesktop.NetworkManager.") === 0 ||
+        action.id.indexOf("org.bluez.") === 0 ||
         action.id.indexOf("org.freedesktop.login1.power-off") === 0 ||
         action.id.indexOf("org.freedesktop.login1.reboot") === 0
     )) {

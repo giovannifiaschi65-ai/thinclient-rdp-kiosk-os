@@ -1,0 +1,683 @@
+#!/usr/bin/env python3
+"""
+Helper privilegiato per la gestione Bluetooth (Mouse Classici BR/EDR e Bluetooth Low Energy HOGP)
+tramite D-Bus BlueZ (org.bluez) e salvataggio persistente su USB Rufus / Disco Interno.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+import gi
+from gi.repository import Gio, GLib
+
+BLUEZ_BUS = "org.bluez"
+OBJ_MGR_IFACE = "org.freedesktop.DBus.ObjectManager"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+DEVICE_IFACE = "org.bluez.Device1"
+AGENT_MGR_IFACE = "org.bluez.AgentManager1"
+AGENT_IFACE = "org.bluez.Agent1"
+AGENT_PATH = "/org/rdpkiosk/bt_agent"
+
+HID_UUID_PREFIXES = (
+    "00001124-",  # Classic Bluetooth HID
+    "00001812-",  # BLE HOGP (HID over GATT)
+)
+
+MOUSE_KEYWORDS = (
+    "mouse",
+    "mice",
+    "trackball",
+    "trackpad",
+    "touchpad",
+    "magic mouse",
+    "mx master",
+    "mx anywhere",
+    "mx ergo",
+    "mx vertical",
+    "pebble",
+    "sculpt",
+    "arc touch",
+    "bluetooth mouse",
+    "bt mouse",
+    "m185",
+    "m190",
+    "m220",
+    "m240",
+    "m330",
+    "m350",
+    "m535",
+    "m550",
+    "m585",
+    "m590",
+    "m650",
+    "m720",
+    "lift",
+)
+
+MAC_ALIAS_RE = re.compile(r"^[0-9A-Fa-f]{2}([-:][0-9A-Fa-f]{2}){5}$")
+
+AGENT_XML = """
+<node>
+  <interface name="org.bluez.Agent1">
+    <method name="Release"/>
+    <method name="RequestPinCode">
+      <arg type="o" name="device" direction="in"/>
+      <arg type="s" name="pincode" direction="out"/>
+    </method>
+    <method name="DisplayPinCode">
+      <arg type="o" name="device" direction="in"/>
+      <arg type="s" name="pincode" direction="in"/>
+    </method>
+    <method name="RequestPasskey">
+      <arg type="o" name="device" direction="in"/>
+      <arg type="u" name="passkey" direction="out"/>
+    </method>
+    <method name="DisplayPasskey">
+      <arg type="o" name="device" direction="in"/>
+      <arg type="u" name="passkey" direction="in"/>
+      <arg type="q" name="entered" direction="in"/>
+    </method>
+    <method name="RequestConfirmation">
+      <arg type="o" name="device" direction="in"/>
+      <arg type="u" name="passkey" direction="in"/>
+    </method>
+    <method name="RequestAuthorization">
+      <arg type="o" name="device" direction="in"/>
+    </method>
+    <method name="AuthorizeService">
+      <arg type="o" name="device" direction="in"/>
+      <arg type="s" name="uuid" direction="in"/>
+    </method>
+    <method name="Cancel"/>
+  </interface>
+</node>
+"""
+
+
+def run_cmd(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def sync_persistence() -> None:
+    run_cmd(["/usr/local/sbin/rdp-sync-netconfig"], timeout=15)
+
+
+def ensure_bt_service(unblock: bool = False) -> bool:
+    run_cmd(
+        ["modprobe", "-ab", "uhid", "hid_generic", "btusb", "hidp"],
+        timeout=6,
+    )
+    if unblock:
+        run_cmd(["rfkill", "unblock", "bluetooth"], timeout=5)
+    chk = run_cmd(["systemctl", "is-active", "--quiet", "bluetooth.service"], timeout=5)
+    if chk.returncode != 0:
+        run_cmd(["systemctl", "start", "bluetooth.service"], timeout=10)
+        time.sleep(0.4)
+        chk = run_cmd(["systemctl", "is-active", "--quiet", "bluetooth.service"], timeout=5)
+    return chk.returncode == 0
+
+
+def get_bus() -> Gio.DBusConnection:
+    return Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+
+def get_managed_objects(bus: Gio.DBusConnection) -> dict:
+    res = bus.call_sync(
+        BLUEZ_BUS,
+        "/",
+        OBJ_MGR_IFACE,
+        "GetManagedObjects",
+        None,
+        GLib.VariantType("(a{oa{sa{sv}}})"),
+        Gio.DBusCallFlags.NONE,
+        8000,
+        None,
+    )
+    return res.unpack()[0]
+
+
+def set_dbus_prop(
+    bus: Gio.DBusConnection, obj_path: str, iface: str, prop: str, variant: GLib.Variant
+) -> None:
+    bus.call_sync(
+        BLUEZ_BUS,
+        obj_path,
+        PROPS_IFACE,
+        "Set",
+        GLib.Variant("(ssv)", (iface, prop, variant)),
+        None,
+        Gio.DBusCallFlags.NONE,
+        8000,
+        None,
+    )
+
+
+def classify_device(props: dict) -> tuple[bool, bool, bool]:
+    """Restituisce (keep_in_list, is_mouse, is_hid)."""
+    paired = bool(props.get("Paired", False))
+    connected = bool(props.get("Connected", False))
+    trusted = bool(props.get("Trusted", False))
+    raw_name = str(props.get("Name", "") or "").strip()
+    alias = str(props.get("Alias", "") or "").strip()
+    icon = str(props.get("Icon", "") or "").lower()
+    appearance = int(props.get("Appearance", 0) or 0)
+    cod = int(props.get("Class", 0) or 0)
+    uuids = [str(u).lower() for u in (props.get("UUIDs") or [])]
+
+    has_hid_uuid = any(u.startswith(HID_UUID_PREFIXES) for u in uuids)
+    major_cls = (cod >> 8) & 0x1F
+    minor_pointing = ((cod >> 6) & 0x03) in (2, 3)
+
+    is_mouse = (
+        icon == "input-mouse"
+        or appearance == 0x03C2
+        or (major_cls == 5 and minor_pointing)
+        or any(kw in (raw_name or alias).lower() for kw in MOUSE_KEYWORDS)
+    )
+    is_hid = (
+        is_mouse
+        or has_hid_uuid
+        or icon.startswith("input-")
+        or (0x03C0 <= appearance <= 0x03CF)
+        or major_cls == 5
+    )
+
+    has_real_name = bool(raw_name) or (bool(alias) and not MAC_ALIAS_RE.match(alias))
+    keep = paired or connected or trusted or is_hid or has_real_name
+    return keep, is_mouse, is_hid
+
+
+def collect_status(bus: Gio.DBusConnection, service_ok: bool) -> dict:
+    if not service_ok:
+        return {
+            "ok": True,
+            "service_active": False,
+            "has_adapter": False,
+            "adapter": None,
+            "devices": [],
+        }
+
+    try:
+        objects = get_managed_objects(bus)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Servizio Bluetooth non raggiungibile: {exc}",
+            "service_active": False,
+            "has_adapter": False,
+            "adapter": None,
+            "devices": [],
+        }
+
+    adapter_path = None
+    adapter_props = None
+    for path, ifaces in sorted(objects.items()):
+        if ADAPTER_IFACE in ifaces:
+            adapter_path = path
+            adapter_props = ifaces[ADAPTER_IFACE]
+            break
+
+    if not adapter_path or adapter_props is None:
+        return {
+            "ok": True,
+            "service_active": True,
+            "has_adapter": False,
+            "adapter": None,
+            "devices": [],
+        }
+
+    devices = []
+    prefix = adapter_path.rstrip("/") + "/"
+    for path, ifaces in objects.items():
+        if not path.startswith(prefix) or DEVICE_IFACE not in ifaces:
+            continue
+        p = ifaces[DEVICE_IFACE]
+        addr = str(p.get("Address", "") or "").strip().upper()
+        if not addr:
+            continue
+        keep, is_mouse, is_hid = classify_device(p)
+        if not keep:
+            continue
+
+        raw_name = str(p.get("Name", "") or "").strip()
+        alias = str(p.get("Alias", "") or "").strip()
+        display_name = raw_name or alias or addr
+        rssi = p.get("RSSI")
+        devices.append(
+            {
+                "path": path,
+                "address": addr,
+                "name": display_name,
+                "paired": bool(p.get("Paired", False)),
+                "trusted": bool(p.get("Trusted", False)),
+                "connected": bool(p.get("Connected", False)),
+                "is_mouse": is_mouse,
+                "is_hid": is_hid,
+                "rssi": int(rssi) if rssi is not None else -999,
+            }
+        )
+
+    devices.sort(
+        key=lambda d: (
+            0 if d["connected"] else 1,
+            0 if d["paired"] else 1,
+            0 if d["is_mouse"] else 1,
+            0 if d["is_hid"] else 1,
+            -d["rssi"],
+            d["name"].lower(),
+        )
+    )
+
+    return {
+        "ok": True,
+        "service_active": True,
+        "has_adapter": True,
+        "adapter": {
+            "path": adapter_path,
+            "address": str(adapter_props.get("Address", "") or ""),
+            "name": str(adapter_props.get("Alias") or adapter_props.get("Name") or "Bluetooth"),
+            "powered": bool(adapter_props.get("Powered", False)),
+            "discovering": bool(adapter_props.get("Discovering", False)),
+        },
+        "devices": devices,
+    }
+
+
+def find_adapter_and_device(bus: Gio.DBusConnection, mac: str) -> tuple[str | None, dict | None, str | None, dict | None]:
+    target = mac.strip().upper()
+    objects = get_managed_objects(bus)
+    adapter_path = None
+    adapter_props = None
+    for path, ifaces in sorted(objects.items()):
+        if ADAPTER_IFACE in ifaces:
+            adapter_path = path
+            adapter_props = ifaces[ADAPTER_IFACE]
+            break
+    if not adapter_path:
+        return None, None, None, None
+
+    prefix = adapter_path.rstrip("/") + "/"
+    for path, ifaces in objects.items():
+        if path.startswith(prefix) and DEVICE_IFACE in ifaces:
+            p = ifaces[DEVICE_IFACE]
+            if str(p.get("Address", "")).strip().upper() == target:
+                return adapter_path, adapter_props, path, p
+    return adapter_path, adapter_props, None, None
+
+
+def call_async_with_mainloop(
+    bus: Gio.DBusConnection,
+    obj_path: str,
+    iface: str,
+    method: str,
+    params: GLib.Variant | None = None,
+    timeout_ms: int = 20000,
+) -> tuple[bool, str]:
+    loop = GLib.MainLoop()
+    outcome = {"ok": False, "err": ""}
+    watchdog_fired = {"v": False}
+
+    def _on_watchdog() -> bool:
+        watchdog_fired["v"] = True
+        if not outcome["ok"] and not outcome["err"]:
+            outcome["err"] = "Timeout operazione Bluetooth."
+        if loop.is_running():
+            loop.quit()
+        return False
+
+    timer_id = GLib.timeout_add(timeout_ms + 2000, _on_watchdog)
+
+    def _on_done(conn: Gio.DBusConnection, res: Gio.AsyncResult) -> None:
+        try:
+            conn.call_finish(res)
+            outcome["ok"] = True
+        except Exception as exc:
+            outcome["err"] = str(exc)
+        finally:
+            if loop.is_running():
+                loop.quit()
+
+    bus.call(
+        BLUEZ_BUS,
+        obj_path,
+        iface,
+        method,
+        params,
+        None,
+        Gio.DBusCallFlags.NONE,
+        timeout_ms,
+        None,
+        _on_done,
+    )
+    loop.run()
+    if not watchdog_fired["v"]:
+        GLib.source_remove(timer_id)
+    return outcome["ok"], outcome["err"]
+
+
+class AutoPairAgent:
+    """Agente D-Bus NoInputNoOutput per associare mouse Bluetooth/BLE senza PIN manuali."""
+
+    def __init__(self, bus: Gio.DBusConnection) -> None:
+        self.bus = bus
+        self.reg_id = 0
+        self.registered_mgr = False
+
+    def __enter__(self) -> "AutoPairAgent":
+        node_info = Gio.DBusNodeInfo.new_for_xml(AGENT_XML)
+        iface_info = node_info.lookup_interface(AGENT_IFACE)
+        self.reg_id = self.bus.register_object(
+            AGENT_PATH, iface_info, self._on_method_call, None, None
+        )
+        try:
+            self.bus.call_sync(
+                BLUEZ_BUS,
+                "/org/bluez",
+                AGENT_MGR_IFACE,
+                "RegisterAgent",
+                GLib.Variant("(os)", (AGENT_PATH, "NoInputNoOutput")),
+                None,
+                Gio.DBusCallFlags.NONE,
+                5000,
+                None,
+            )
+            self.registered_mgr = True
+            self.bus.call_sync(
+                BLUEZ_BUS,
+                "/org/bluez",
+                AGENT_MGR_IFACE,
+                "RequestDefaultAgent",
+                GLib.Variant("(o)", (AGENT_PATH,)),
+                None,
+                Gio.DBusCallFlags.NONE,
+                5000,
+                None,
+            )
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, *_args) -> None:
+        if self.registered_mgr:
+            try:
+                self.bus.call_sync(
+                    BLUEZ_BUS,
+                    "/org/bluez",
+                    AGENT_MGR_IFACE,
+                    "UnregisterAgent",
+                    GLib.Variant("(o)", (AGENT_PATH,)),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    3000,
+                    None,
+                )
+            except Exception:
+                pass
+        if self.reg_id:
+            try:
+                self.bus.unregister_object(self.reg_id)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _on_method_call(
+        _conn: Gio.DBusConnection,
+        _sender: str,
+        _obj_path: str,
+        _iface_name: str,
+        method_name: str,
+        _params: GLib.Variant,
+        invocation: Gio.DBusMethodInvocation,
+    ) -> None:
+        if method_name == "RequestPinCode":
+            invocation.return_value(GLib.Variant("(s)", ("0000",)))
+        elif method_name == "RequestPasskey":
+            invocation.return_value(GLib.Variant("(u)", (0,)))
+        else:
+            invocation.return_value(None)
+
+
+def cmd_status() -> dict:
+    svc = ensure_bt_service(unblock=False)
+    bus = get_bus()
+    return collect_status(bus, svc)
+
+
+def cmd_power(state: str) -> dict:
+    turn_on = state.lower() in ("on", "1", "true")
+    svc = ensure_bt_service(unblock=turn_on)
+    bus = get_bus()
+    st = collect_status(bus, svc)
+    if not st.get("has_adapter"):
+        return {
+            "ok": False,
+            "error": "Nessun adattatore Bluetooth rilevato su questo computer.",
+        }
+    adapter_path = st["adapter"]["path"]
+    if not turn_on and st["adapter"].get("discovering"):
+        try:
+            bus.call_sync(
+                BLUEZ_BUS, adapter_path, ADAPTER_IFACE, "StopDiscovery",
+                None, None, Gio.DBusCallFlags.NONE, 4000, None,
+            )
+        except Exception:
+            pass
+    try:
+        set_dbus_prop(bus, adapter_path, ADAPTER_IFACE, "Powered", GLib.Variant("b", turn_on))
+        time.sleep(0.3)
+    except Exception as exc:
+        return {"ok": False, "error": f"Impossibile modificare lo stato Bluetooth: {exc}"}
+    return collect_status(bus, True)
+
+
+def cmd_scan() -> dict:
+    svc = ensure_bt_service(unblock=True)
+    bus = get_bus()
+    st = collect_status(bus, svc)
+    if not st.get("has_adapter"):
+        return {
+            "ok": False,
+            "error": "Nessun adattatore Bluetooth rilevato (verifica se è presente o collega una chiavetta USB Bluetooth).",
+        }
+    adapter_path = st["adapter"]["path"]
+    try:
+        if not st["adapter"].get("powered"):
+            set_dbus_prop(bus, adapter_path, ADAPTER_IFACE, "Powered", GLib.Variant("b", True))
+            time.sleep(0.4)
+        try:
+            bus.call_sync(
+                BLUEZ_BUS,
+                adapter_path,
+                ADAPTER_IFACE,
+                "SetDiscoveryFilter",
+                GLib.Variant("(a{sv})", ({"Transport": GLib.Variant("s", "auto")},)),
+                None,
+                Gio.DBusCallFlags.NONE,
+                4000,
+                None,
+            )
+        except Exception:
+            pass
+
+        if not st["adapter"].get("discovering"):
+            bus.call_sync(
+                BLUEZ_BUS, adapter_path, ADAPTER_IFACE, "StartDiscovery",
+                None, None, Gio.DBusCallFlags.NONE, 6000, None,
+            )
+
+        deadline = time.monotonic() + 5.5
+        ctx = GLib.MainContext.default()
+        while time.monotonic() < deadline:
+            while ctx.pending():
+                ctx.iteration(False)
+            time.sleep(0.1)
+
+        try:
+            bus.call_sync(
+                BLUEZ_BUS, adapter_path, ADAPTER_IFACE, "StopDiscovery",
+                None, None, Gio.DBusCallFlags.NONE, 4000, None,
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        return {"ok": False, "error": f"Errore durante la ricerca Bluetooth: {exc}"}
+
+    return collect_status(bus, True)
+
+
+def cmd_connect(mac: str) -> dict:
+    if not mac:
+        return {"ok": False, "error": "Indirizzo Bluetooth mancante."}
+    ensure_bt_service(unblock=True)
+    bus = get_bus()
+    adapter_path, adapter_props, dev_path, dev_props = find_adapter_and_device(bus, mac)
+    if not adapter_path or adapter_props is None:
+        return {"ok": False, "error": "Adattatore Bluetooth non disponibile."}
+    if not dev_path or dev_props is None:
+        return {"ok": False, "error": "Dispositivo non trovato. Premi prima 'Cerca Mouse' con il mouse in modalità associazione."}
+
+    if not bool(adapter_props.get("Powered", False)):
+        set_dbus_prop(bus, adapter_path, ADAPTER_IFACE, "Powered", GLib.Variant("b", True))
+        time.sleep(0.3)
+
+    if bool(adapter_props.get("Discovering", False)):
+        try:
+            bus.call_sync(
+                BLUEZ_BUS, adapter_path, ADAPTER_IFACE, "StopDiscovery",
+                None, None, Gio.DBusCallFlags.NONE, 4000, None,
+            )
+            time.sleep(0.25)
+        except Exception:
+            pass
+
+    with AutoPairAgent(bus):
+        try:
+            set_dbus_prop(bus, dev_path, DEVICE_IFACE, "Trusted", GLib.Variant("b", True))
+        except Exception:
+            pass
+
+        if not bool(dev_props.get("Paired", False)):
+            ok_pair, err_pair = call_async_with_mainloop(
+                bus, dev_path, DEVICE_IFACE, "Pair", None, timeout_ms=20000
+            )
+            if not ok_pair and "AlreadyExists" not in err_pair:
+                # Alcuni mouse Bluetooth classici non richiedono Pair SSP ma solo Connect HID
+                pass
+
+        try:
+            set_dbus_prop(bus, dev_path, DEVICE_IFACE, "Trusted", GLib.Variant("b", True))
+        except Exception:
+            pass
+
+        _, _, _, refreshed = find_adapter_and_device(bus, mac)
+        already_conn = bool((refreshed or {}).get("Connected", False))
+        if not already_conn:
+            ok_conn, err_conn = call_async_with_mainloop(
+                bus, dev_path, DEVICE_IFACE, "Connect", None, timeout_ms=16000
+            )
+            if not ok_conn and "AlreadyConnected" not in err_conn:
+                _, _, _, post_props = find_adapter_and_device(bus, mac)
+                if not bool((post_props or {}).get("Connected", False)):
+                    return {
+                        "ok": False,
+                        "error": "Connessione non riuscita. Assicurati che il mouse sia acceso e in modalità accoppiamento (LED lampeggiante).",
+                    }
+
+    sync_persistence()
+    res = collect_status(bus, True)
+    res["message"] = "Mouse Bluetooth associato, connesso e salvato in memoria!"
+    return res
+
+
+def cmd_disconnect(mac: str) -> dict:
+    if not mac:
+        return {"ok": False, "error": "Indirizzo Bluetooth mancante."}
+    ensure_bt_service(unblock=False)
+    bus = get_bus()
+    _, _, dev_path, _ = find_adapter_and_device(bus, mac)
+    if not dev_path:
+        return {"ok": False, "error": "Dispositivo Bluetooth non trovato."}
+    ok, err = call_async_with_mainloop(
+        bus, dev_path, DEVICE_IFACE, "Disconnect", None, timeout_ms=8000
+    )
+    if not ok and "NotConnected" not in err:
+        return {"ok": False, "error": f"Impossibile disconnettere il dispositivo: {err}"}
+    res = collect_status(bus, True)
+    res["message"] = "Dispositivo Bluetooth disconnesso."
+    return res
+
+
+def cmd_remove(mac: str) -> dict:
+    if not mac:
+        return {"ok": False, "error": "Indirizzo Bluetooth mancante."}
+    ensure_bt_service(unblock=False)
+    bus = get_bus()
+    adapter_path, _, dev_path, _ = find_adapter_and_device(bus, mac)
+    if not adapter_path or not dev_path:
+        return collect_status(bus, True)
+    try:
+        bus.call_sync(
+            BLUEZ_BUS,
+            adapter_path,
+            ADAPTER_IFACE,
+            "RemoveDevice",
+            GLib.Variant("(o)", (dev_path,)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            8000,
+            None,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"Impossibile rimuovere il dispositivo: {exc}"}
+
+    sync_persistence()
+    res = collect_status(bus, True)
+    res["message"] = "Associazione Bluetooth rimossa dalla memoria."
+    return res
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print(json.dumps({"ok": False, "error": "Permessi root richiesti."}))
+        return 1
+
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    arg = sys.argv[2] if len(sys.argv) > 2 else ""
+
+    try:
+        if cmd == "status":
+            out = cmd_status()
+        elif cmd == "scan":
+            out = cmd_scan()
+        elif cmd == "power":
+            out = cmd_power(arg or "on")
+        elif cmd == "connect":
+            out = cmd_connect(arg)
+        elif cmd == "disconnect":
+            out = cmd_disconnect(arg)
+        elif cmd == "remove":
+            out = cmd_remove(arg)
+        else:
+            out = {"ok": False, "error": f"Comando sconosciuto: {cmd}"}
+    except Exception as exc:
+        out = {"ok": False, "error": f"Errore interno Bluetooth: {exc}"}
+
+    print(json.dumps(out, ensure_ascii=False))
+    return 0 if out.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

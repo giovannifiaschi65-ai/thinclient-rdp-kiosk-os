@@ -142,6 +142,7 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     wpasupplicant \
     wireless-regdb \
     rfkill \
+    bluez \
     iproute2 \
     iputils-ping \
     isc-dhcp-client \
@@ -162,6 +163,7 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     x11-xserver-utils \
     x11-xkb-utils \
     xkb-data \
+    xinput \
     xinit \
     xauth \
     openbox \
@@ -264,6 +266,8 @@ chown -R root:root \
     "${CHROOT_DIR}/etc/systemd/system" \
     "${CHROOT_DIR}/etc/udev/rules.d" \
     "${CHROOT_DIR}/etc/modprobe.d" \
+    "${CHROOT_DIR}/etc/modules-load.d" \
+    "${CHROOT_DIR}/etc/bluetooth" \
     "${CHROOT_DIR}/etc/X11" \
     "${CHROOT_DIR}/etc/xdg" \
     "${CHROOT_DIR}/usr/local/bin" \
@@ -297,6 +301,7 @@ chmod 0755 \
     "${CHROOT_DIR}/usr/local/bin/rdp-kiosk-ui" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-power-action" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-net-helper" \
+    "${CHROOT_DIR}/usr/local/sbin/rdp-bt-helper" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-sync-netconfig" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-install-disk" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-save-target" \
@@ -325,7 +330,8 @@ EOF
 chroot "${CHROOT_DIR}" /usr/sbin/visudo -cf /etc/sudoers.d/kiosk-power
 chroot "${CHROOT_DIR}" /usr/bin/python3 -m py_compile \
     /usr/local/bin/rdp-kiosk-ui \
-    /usr/local/sbin/rdp-net-helper
+    /usr/local/sbin/rdp-net-helper \
+    /usr/local/sbin/rdp-bt-helper
 chroot "${CHROOT_DIR}" /bin/bash -n \
     /usr/local/bin/kiosk-tty-launcher \
     /usr/local/bin/kiosk-xsession \
@@ -382,12 +388,12 @@ for unused_theme in homeworld emerald solar spacefun moonlight glow fade-in spin
 done
 plymouth-set-default-theme rdp-kiosk
 
-# Crea utente non privilegiato 'kiosk' (inclusi gruppi audio, rete e stampa CUPS)
-for grp in plugdev lp lpadmin; do
+# Crea utente non privilegiato 'kiosk' (inclusi gruppi audio, rete, Bluetooth e stampa CUPS)
+for grp in plugdev lp lpadmin bluetooth; do
     getent group "$grp" >/dev/null 2>&1 || groupadd -r "$grp"
 done
 if ! id -u kiosk >/dev/null 2>&1; then
-    useradd -m -s /bin/bash -G video,render,input,audio,netdev,plugdev,lp,lpadmin kiosk
+    useradd -m -s /bin/bash -G video,render,input,audio,netdev,plugdev,lp,lpadmin,bluetooth kiosk
 fi
 
 # Blocca password di accesso diretto (nessun login da remoto/console manuale)
@@ -404,8 +410,9 @@ EOF
 cp /home/kiosk/.bash_profile /home/kiosk/.profile
 chown -R kiosk:kiosk /home/kiosk
 
-# Abilita servizi essenziali (rete, NTP, stampa CUPS, Smart Card PC/SC) e disabilita TTY secondari
+# Abilita servizi essenziali (rete, Bluetooth, NTP, stampa CUPS, Smart Card PC/SC) e disabilita TTY secondari
 systemctl enable NetworkManager.service
+systemctl enable bluetooth.service
 systemctl enable systemd-timesyncd.service
 systemctl enable avahi-daemon.service
 systemctl enable cups.service
@@ -470,6 +477,21 @@ EOF
 
 # Rigenera initramfs con supporto live-boot e splash animato Plymouth
 KVER="$(ls -1 /lib/modules | sort -V | tail -n 1)"
+if [ -n "${KVER}" ] && [ -f /etc/modules-load.d/input-hid.conf ]; then
+    TMP_MODS="$(mktemp)"
+    while IFS= read -r mod; do
+        case "$mod" in
+            ""|\#*) echo "$mod" >> "$TMP_MODS" ;;
+            *)
+                if modinfo -k "${KVER}" "$mod" >/dev/null 2>&1; then
+                    echo "$mod" >> "$TMP_MODS"
+                fi
+                ;;
+        esac
+    done < /etc/modules-load.d/input-hid.conf
+    mv -f "$TMP_MODS" /etc/modules-load.d/input-hid.conf
+    chmod 0644 /etc/modules-load.d/input-hid.conf
+fi
 update-initramfs -c -k "${KVER}" || update-initramfs -u -k "${KVER}"
 
 # Ottimizzazione Livello 1: pulizia documentazione, manpages, icone giganti e traduzioni estere

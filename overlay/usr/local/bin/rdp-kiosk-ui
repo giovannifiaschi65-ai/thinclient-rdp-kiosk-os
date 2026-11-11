@@ -532,6 +532,11 @@ class RdpKioskWindow(Gtk.Window):
         self.wifi_networks: list[dict] = []
         self.selected_wifi_secured = True
         self.net_busy = False
+        self.bt_busy = False
+        self.bt_powered = False
+        self.bt_has_adapter = False
+        self.bt_devices: list[dict] = []
+        self.selected_bt_device: dict | None = None
 
         self._apply_css()
         self._configure_window()
@@ -612,6 +617,12 @@ class RdpKioskWindow(Gtk.Window):
         self.net_settings_btn.connect("clicked", lambda _w: self._open_network_panel())
         topbar.pack_start(self.net_settings_btn, False, False, 0)
 
+        self.bt_settings_btn = Gtk.Button(label="🖱 Bluetooth")
+        self.bt_settings_btn.get_style_context().add_class("btn-topbar")
+        self.bt_settings_btn.set_tooltip_text("Associa e gestisci Mouse Bluetooth")
+        self.bt_settings_btn.connect("clicked", lambda _w: self._open_bluetooth_panel())
+        topbar.pack_start(self.bt_settings_btn, False, False, 0)
+
         kbd_label = Gtk.Label(label="IT")
         kbd_label.get_style_context().add_class("kbd-badge")
         kbd_label.set_tooltip_text("Layout tastiera: Italiano (QWERTY)")
@@ -643,6 +654,7 @@ class RdpKioskWindow(Gtk.Window):
         self.stack.add_named(self._build_login_form(), "login")
         self.stack.add_named(self._build_power_confirm(), "confirm_power")
         self.stack.add_named(self._build_network_panel(), "network")
+        self.stack.add_named(self._build_bluetooth_panel(), "bluetooth")
 
     def _build_login_form(self) -> Gtk.Widget:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -1259,6 +1271,373 @@ class RdpKioskWindow(Gtk.Window):
         self._show_net_banner(msg, kind="success", spinning=False)
         return False
 
+    def _build_bluetooth_panel(self) -> Gtk.Widget:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        hdr_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title_lbl = Gtk.Label(label="Gestione Mouse Bluetooth")
+        title_lbl.get_style_context().add_class("card-header")
+        title_lbl.set_halign(Gtk.Align.START)
+        hdr_row.pack_start(title_lbl, True, True, 0)
+
+        back_btn = Gtk.Button(label="← Login")
+        back_btn.get_style_context().add_class("btn-secondary")
+        back_btn.connect("clicked", lambda _w: self.stack.set_visible_child_name("login"))
+        hdr_row.pack_start(back_btn, False, False, 0)
+        vbox.pack_start(hdr_row, False, False, 0)
+
+        sub_lbl = Gtk.Label(
+            label="Metti il mouse Bluetooth in modalità associazione, premi 'Cerca Mouse' e clicca 'Connetti'."
+        )
+        sub_lbl.get_style_context().add_class("card-subtitle")
+        sub_lbl.set_halign(Gtk.Align.START)
+        sub_lbl.set_line_wrap(True)
+        sub_lbl.set_xalign(0.0)
+        vbox.pack_start(sub_lbl, False, False, 0)
+
+        self.bt_banner_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.bt_banner_box.get_style_context().add_class("alert-banner")
+        self.bt_banner_box.set_no_show_all(True)
+        self.bt_spinner = Gtk.Spinner()
+        self.bt_banner_box.pack_start(self.bt_spinner, False, False, 0)
+        self.bt_banner_lbl = Gtk.Label(label="")
+        self.bt_banner_lbl.set_line_wrap(True)
+        self.bt_banner_lbl.set_max_width_chars(50)
+        self.bt_banner_lbl.set_xalign(0.0)
+        self.bt_banner_box.pack_start(self.bt_banner_lbl, True, True, 0)
+        vbox.pack_start(self.bt_banner_box, False, False, 0)
+
+        ctrl_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.bt_adapter_lbl = Gtk.Label(label="Stato Bluetooth: verifica...")
+        self.bt_adapter_lbl.get_style_context().add_class("field-label")
+        self.bt_adapter_lbl.set_halign(Gtk.Align.START)
+        ctrl_bar.pack_start(self.bt_adapter_lbl, True, True, 0)
+
+        self.bt_power_btn = Gtk.Button(label="Spegni BT")
+        self.bt_power_btn.get_style_context().add_class("btn-secondary")
+        self.bt_power_btn.connect("clicked", lambda _w: self._on_bt_toggle_power())
+        ctrl_bar.pack_start(self.bt_power_btn, False, False, 0)
+
+        self.bt_scan_btn = Gtk.Button(label="🔍 Cerca Mouse")
+        self.bt_scan_btn.get_style_context().add_class("btn-secondary")
+        self.bt_scan_btn.connect("clicked", lambda _w: self._on_bt_scan())
+        ctrl_bar.pack_start(self.bt_scan_btn, False, False, 0)
+        vbox.pack_start(ctrl_bar, False, False, 0)
+
+        sc_win = Gtk.ScrolledWindow()
+        sc_win.get_style_context().add_class("wifi-frame")
+        sc_win.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc_win.set_min_content_height(185)
+        sc_win.set_max_content_height(185)
+
+        self.bt_listbox = Gtk.ListBox()
+        self.bt_listbox.get_style_context().add_class("wifi-list")
+        self.bt_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.bt_listbox.connect("row-selected", self._on_bt_row_selected)
+        self.bt_listbox.connect("row-activated", lambda _lb, _r: self._on_bt_connect())
+        sc_win.add(self.bt_listbox)
+        vbox.pack_start(sc_win, False, False, 0)
+
+        foot_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        close_btn = Gtk.Button(label="Chiudi")
+        close_btn.get_style_context().add_class("btn-secondary")
+        close_btn.connect("clicked", lambda _w: self.stack.set_visible_child_name("login"))
+        foot_row.pack_start(close_btn, False, False, 0)
+
+        b_spacer = Gtk.Box()
+        foot_row.pack_start(b_spacer, True, True, 0)
+
+        self.bt_remove_btn = Gtk.Button(label="Rimuovi")
+        self.bt_remove_btn.get_style_context().add_class("btn-danger")
+        self.bt_remove_btn.connect("clicked", lambda _w: self._on_bt_remove())
+        foot_row.pack_start(self.bt_remove_btn, False, False, 0)
+
+        self.bt_disc_btn = Gtk.Button(label="Disconnetti")
+        self.bt_disc_btn.get_style_context().add_class("btn-secondary")
+        self.bt_disc_btn.connect("clicked", lambda _w: self._on_bt_disconnect())
+        foot_row.pack_start(self.bt_disc_btn, False, False, 0)
+
+        self.bt_connect_btn = Gtk.Button(label="Connetti")
+        self.bt_connect_btn.get_style_context().add_class("btn-connect")
+        self.bt_connect_btn.connect("clicked", lambda _w: self._on_bt_connect())
+        foot_row.pack_start(self.bt_connect_btn, False, False, 0)
+
+        vbox.pack_start(foot_row, False, False, 2)
+        self._update_bt_action_buttons()
+        return vbox
+
+    def _show_bt_banner(self, msg: str, kind: str = "info", spinning: bool = False) -> None:
+        ctx = self.bt_banner_box.get_style_context()
+        for c in ("alert-error", "alert-info", "alert-success"):
+            ctx.remove_class(c)
+        ctx.add_class(f"alert-{kind}")
+        self.bt_banner_lbl.set_text(msg)
+        if spinning:
+            self.bt_spinner.show()
+            self.bt_spinner.start()
+        else:
+            self.bt_spinner.stop()
+            self.bt_spinner.hide()
+        self.bt_banner_lbl.show()
+        self.bt_banner_box.show()
+
+    def _hide_bt_banner(self) -> None:
+        self.bt_spinner.stop()
+        self.bt_banner_box.hide()
+
+    def _run_bt_helper(self, args: list[str], timeout: int = 30) -> dict:
+        try:
+            proc = subprocess.run(
+                ["sudo", "-n", "/usr/local/sbin/rdp-bt-helper", *args],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            out = (proc.stdout or "").strip()
+            if out:
+                return json.loads(out.splitlines()[-1])
+            err = (proc.stderr or "").strip()
+            return {"ok": False, "error": err or f"Errore helper Bluetooth (codice {proc.returncode})."}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _open_bluetooth_panel(self) -> None:
+        if self.connecting:
+            return
+        self._hide_bt_banner()
+        self.stack.set_visible_child_name("bluetooth")
+        self._refresh_bt_status_async()
+
+    def _refresh_bt_status_async(self) -> None:
+        if self.bt_busy:
+            return
+        self.bt_busy = True
+        self._update_bt_action_buttons()
+
+        def _worker() -> None:
+            res = self._run_bt_helper(["status"], timeout=12)
+            GLib.idle_add(self._apply_bt_result, res, False)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_bt_scan(self) -> None:
+        if self.bt_busy:
+            return
+        self.bt_busy = True
+        self._update_bt_action_buttons()
+        self._show_bt_banner("Ricerca mouse e dispositivi Bluetooth nelle vicinanze...", kind="info", spinning=True)
+
+        def _worker() -> None:
+            res = self._run_bt_helper(["scan"], timeout=18)
+            GLib.idle_add(self._apply_bt_result, res, True)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_bt_toggle_power(self) -> None:
+        if self.bt_busy or not self.bt_has_adapter:
+            return
+        target = "off" if self.bt_powered else "on"
+        self.bt_busy = True
+        self._update_bt_action_buttons()
+        self._show_bt_banner(
+            "Attivazione Bluetooth..." if target == "on" else "Disattivazione Bluetooth...",
+            kind="info",
+            spinning=True,
+        )
+
+        def _worker() -> None:
+            res = self._run_bt_helper(["power", target], timeout=12)
+            GLib.idle_add(self._apply_bt_result, res, False)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_bt_connect(self) -> None:
+        if self.bt_busy or not self.selected_bt_device:
+            return
+        if self.selected_bt_device.get("connected"):
+            return
+        mac = self.selected_bt_device.get("address", "")
+        name = self.selected_bt_device.get("name", mac)
+        self.bt_busy = True
+        self._update_bt_action_buttons()
+        self._show_bt_banner(f"Associazione e connessione a '{name}' in corso...", kind="info", spinning=True)
+
+        def _worker() -> None:
+            res = self._run_bt_helper(["connect", mac], timeout=42)
+            GLib.idle_add(self._apply_bt_result, res, False)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_bt_disconnect(self) -> None:
+        if self.bt_busy or not self.selected_bt_device:
+            return
+        mac = self.selected_bt_device.get("address", "")
+        self.bt_busy = True
+        self._update_bt_action_buttons()
+        self._show_bt_banner("Disconnessione dispositivo in corso...", kind="info", spinning=True)
+
+        def _worker() -> None:
+            res = self._run_bt_helper(["disconnect", mac], timeout=14)
+            GLib.idle_add(self._apply_bt_result, res, False)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_bt_remove(self) -> None:
+        if self.bt_busy or not self.selected_bt_device:
+            return
+        mac = self.selected_bt_device.get("address", "")
+        self.bt_busy = True
+        self._update_bt_action_buttons()
+        self._show_bt_banner("Rimozione associazione in corso...", kind="info", spinning=True)
+
+        def _worker() -> None:
+            res = self._run_bt_helper(["remove", mac], timeout=14)
+            GLib.idle_add(self._apply_bt_result, res, False)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_bt_result(self, res: dict, from_scan: bool) -> bool:
+        self.bt_busy = False
+        prev_mac = (self.selected_bt_device or {}).get("address", "")
+        self.selected_bt_device = None
+
+        for child in self.bt_listbox.get_children():
+            self.bt_listbox.remove(child)
+
+        if not res.get("ok") and not res.get("has_adapter"):
+            # Potrebbe essere un errore su operazione specifica ma con stato comunque rileggibile
+            self._show_bt_banner(res.get("error", "Errore operazione Bluetooth."), kind="error", spinning=False)
+            self._update_bt_action_buttons()
+            # Ricarica l'elenco corrente se disponibile
+            if "devices" not in res:
+                self._refresh_bt_status_async()
+                return False
+
+        self.bt_has_adapter = bool(res.get("has_adapter", False))
+        adapter = res.get("adapter") or {}
+        self.bt_powered = bool(adapter.get("powered", False))
+
+        if not self.bt_has_adapter:
+            self.bt_adapter_lbl.set_text("○ Nessun adattatore Bluetooth rilevato")
+            self.bt_power_btn.set_label("Attiva BT")
+            placeholder = Gtk.Label(
+                label="Nessun hardware Bluetooth presente (puoi collegare una chiavetta USB Bluetooth)."
+            )
+            placeholder.get_style_context().add_class("wifi-row-label")
+            placeholder.set_line_wrap(True)
+            self.bt_listbox.add(placeholder)
+            self.bt_listbox.show_all()
+            if not res.get("ok"):
+                self._show_bt_banner(res.get("error", "Adattatore Bluetooth assente."), kind="error", spinning=False)
+            else:
+                self._hide_bt_banner()
+            self._update_bt_action_buttons()
+            return False
+
+        if self.bt_powered:
+            self.bt_adapter_lbl.set_text(f"● Bluetooth attivo ({adapter.get('address', '')})")
+            self.bt_power_btn.set_label("Spegni BT")
+        else:
+            self.bt_adapter_lbl.set_text("○ Bluetooth disattivato")
+            self.bt_power_btn.set_label("Attiva BT")
+
+        self.bt_devices = res.get("devices", [])
+        if not self.bt_devices:
+            msg_empty = (
+                "Bluetooth spento. Premi 'Attiva BT' o 'Cerca Mouse'."
+                if not self.bt_powered
+                else "Nessun mouse rilevato. Premi '🔍 Cerca Mouse' col mouse in modalità pairing."
+            )
+            placeholder = Gtk.Label(label=msg_empty)
+            placeholder.get_style_context().add_class("wifi-row-label")
+            placeholder.set_line_wrap(True)
+            self.bt_listbox.add(placeholder)
+        else:
+            row_to_select = None
+            first_row = None
+            for dev in self.bt_devices:
+                row = Gtk.ListBoxRow()
+                row.bt_data = dev
+                hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+                icon_ch = "🖱" if dev.get("is_mouse") else ("⌨" if dev.get("is_hid") else "🔵")
+                name_lbl = Gtk.Label(label=f"{icon_ch}  {dev['name']}  ({dev['address']})")
+                name_lbl.get_style_context().add_class("wifi-row-label")
+                name_lbl.set_halign(Gtk.Align.START)
+                hbox.pack_start(name_lbl, True, True, 0)
+
+                if dev.get("connected"):
+                    st_txt = "✓ Connesso"
+                elif dev.get("paired"):
+                    st_txt = "Associato"
+                else:
+                    st_txt = "Disponibile"
+                st_lbl = Gtk.Label(label=st_txt)
+                st_lbl.get_style_context().add_class("wifi-row-label")
+                hbox.pack_start(st_lbl, False, False, 0)
+
+                row.add(hbox)
+                self.bt_listbox.add(row)
+                if first_row is None:
+                    first_row = row
+                if prev_mac and dev.get("address") == prev_mac:
+                    row_to_select = row
+
+            self.bt_listbox.show_all()
+            chosen = row_to_select or first_row
+            if chosen is not None:
+                self.bt_listbox.select_row(chosen)
+
+        self.bt_listbox.show_all()
+
+        if not res.get("ok"):
+            self._show_bt_banner(res.get("error", "Operazione non riuscita."), kind="error", spinning=False)
+        elif res.get("message"):
+            self._show_bt_banner(res["message"], kind="success", spinning=False)
+        elif from_scan:
+            n_devs = len(self.bt_devices)
+            self._show_bt_banner(
+                f"Ricerca completata: {n_devs} dispositiv{'o' if n_devs == 1 else 'i'} rilevat{'o' if n_devs == 1 else 'i'}.",
+                kind="info",
+                spinning=False,
+            )
+        else:
+            self._hide_bt_banner()
+
+        self._update_bt_action_buttons()
+        return False
+
+    def _on_bt_row_selected(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
+        if row is None or not hasattr(row, "bt_data"):
+            self.selected_bt_device = None
+        else:
+            self.selected_bt_device = row.bt_data
+        self._update_bt_action_buttons()
+
+    def _update_bt_action_buttons(self) -> None:
+        if not hasattr(self, "bt_connect_btn"):
+            return
+        busy = self.bt_busy
+        self.bt_scan_btn.set_sensitive((not busy) and self.bt_has_adapter)
+        self.bt_power_btn.set_sensitive((not busy) and self.bt_has_adapter)
+
+        dev = self.selected_bt_device
+        if busy or not dev or not self.bt_powered:
+            self.bt_connect_btn.set_sensitive(False)
+            self.bt_disc_btn.set_sensitive(False)
+            self.bt_remove_btn.set_sensitive(False)
+            return
+
+        is_conn = bool(dev.get("connected", False))
+        is_paired = bool(dev.get("paired", False)) or bool(dev.get("trusted", False))
+        self.bt_connect_btn.set_label("Riconnetti" if is_paired else "Associa / Connetti")
+        self.bt_connect_btn.set_sensitive(not is_conn)
+        self.bt_disc_btn.set_sensitive(is_conn)
+        self.bt_remove_btn.set_sensitive(is_paired or is_conn)
+
     def _prompt_power_action(self, action: str) -> None:
         if self.connecting:
             return
@@ -1390,6 +1769,7 @@ class RdpKioskWindow(Gtk.Window):
             self.reboot_btn,
             self.poweroff_btn,
             self.net_settings_btn,
+            self.bt_settings_btn,
         ):
             widget.set_sensitive(enabled)
 

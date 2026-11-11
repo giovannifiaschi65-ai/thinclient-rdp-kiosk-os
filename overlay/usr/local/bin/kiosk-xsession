@@ -10,6 +10,19 @@ export NO_AT_BRIDGE=1
 # Tastiera italiana su X11
 setxkbmap -model pc105 -layout it 2>/dev/null || true
 
+# Garanzia aggiuntiva runtime per Touchpad (Tap, Doppio Tap, Trascinamento e Scorrimento Naturale)
+if command -v xinput >/dev/null 2>&1; then
+    for dev_id in $(xinput list --id-only 2>/dev/null); do
+        if xinput list-props "$dev_id" 2>/dev/null | grep -q "libinput Tapping Enabled ("; then
+            xinput set-prop "$dev_id" "libinput Tapping Enabled" 1 2>/dev/null || true
+            xinput set-prop "$dev_id" "libinput Tapping Drag Enabled" 1 2>/dev/null || true
+            xinput set-prop "$dev_id" "libinput Tapping Drag Lock Enabled" 0 2>/dev/null || true
+            xinput set-prop "$dev_id" "libinput Natural Scrolling Enabled" 1 2>/dev/null || true
+            xinput set-prop "$dev_id" "libinput Disable While Typing Enabled" 1 2>/dev/null || true
+        fi
+    done
+fi
+
 # Sfondo uniforme scuro e cursore standard (nessuno sfarfallio grigio X11)
 xsetroot -solid "#0f172a" 2>/dev/null || true
 xsetroot -cursor_name left_ptr 2>/dev/null || true

@@ -96,6 +96,8 @@ jobs:
 
       - name: Verifica preliminare rapida xorriso + EFI snello + tema Cairo
         run: |
+          python3 -m py_compile overlay/usr/local/bin/rdp-kiosk-ui overlay/usr/local/sbin/rdp-net-helper overlay/usr/local/sbin/rdp-bt-helper build/generate-plymouth-assets.py
+          bash -n build/build-iso.sh overlay/usr/local/bin/kiosk-tty-launcher overlay/usr/local/bin/kiosk-xsession overlay/usr/local/sbin/rdp-power-action overlay/usr/local/sbin/rdp-sync-netconfig overlay/usr/local/sbin/rdp-install-disk overlay/usr/local/sbin/rdp-save-target overlay/usr/local/sbin/rdp-load-config overlay/usr/local/sbin/kiosk-usb-mount overlay/usr/local/sbin/kiosk-printer-autoconfig
           TMP_TEST="$(mktemp -d)"
           python3 build/generate-plymouth-assets.py "${TMP_TEST}/plymouth" "${BUILD_VERSION}"
           ls -lh "${TMP_TEST}/plymouth"

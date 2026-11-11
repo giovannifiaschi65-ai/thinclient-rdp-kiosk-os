@@ -1,8 +1,8 @@
 [Unit]
-Description=Caricamento configurazione persistente Thin Client RDP e Rete/Wi-Fi
+Description=Caricamento configurazione persistente Thin Client RDP, Rete/Wi-Fi e Bluetooth
 DefaultDependencies=no
 After=systemd-udevd.service local-fs.target
-Before=NetworkManager.service NetworkManager-pre.target getty@tty1.service
+Before=NetworkManager.service NetworkManager-pre.target bluetooth.service getty@tty1.service
 Wants=NetworkManager-pre.target
 
 [Service]
@@ -11,4 +11,4 @@ RemainAfterExit=yes
 ExecStart=/usr/local/sbin/rdp-load-config
 
 [Install]
-WantedBy=multi-user.target NetworkManager.service
+WantedBy=multi-user.target NetworkManager.service bluetooth.service

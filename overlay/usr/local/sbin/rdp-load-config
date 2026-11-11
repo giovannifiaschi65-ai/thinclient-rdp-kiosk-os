@@ -1,17 +1,25 @@
 #!/bin/bash
 # Carica all'avvio la configurazione persistente (Server RDP, Dominio, Utente,
-# reti Wi-Fi e impostazioni IP Statico / DNS) sia da Disco Interno, sia da
-# Chiavetta USB Rufus (FAT32 / persistence / partizione dedicata RDPOS_CFG).
+# reti Wi-Fi, IP Statico / DNS e associazioni Mouse Bluetooth) sia da Disco Interno,
+# sia da Chiavetta USB Rufus (FAT32 / persistence / partizione dedicata RDPOS_CFG).
 
 set -uo pipefail
 
-mkdir -p /var/lib/rdp-kiosk /etc/NetworkManager/system-connections
+mkdir -p /var/lib/rdp-kiosk /etc/NetworkManager/system-connections /var/lib/bluetooth
+chmod 0700 /var/lib/bluetooth 2>/dev/null || true
+
 udevadm settle --timeout=5 2>/dev/null || true
 
-# Sblocca eventuali blocchi software radio Wi-Fi
+# Carica anticipatamente moduli HID / Touchpad / Bluetooth (Classico + BLE)
+modprobe -ab uhid hid_generic hid_multitouch i2c_hid i2c_hid_acpi psmouse btusb hidp 2>/dev/null || true
+
+# Sblocca eventuali blocchi software radio Wi-Fi e Bluetooth
 if command -v rfkill >/dev/null 2>&1; then
     rfkill unblock wifi 2>/dev/null || true
+    rfkill unblock bluetooth 2>/dev/null || true
 fi
+
+BT_RESTORED=0
 
 restore_from_dir() {
     local src_dir="$1"
@@ -23,6 +31,12 @@ restore_from_dir() {
         tar -xf "${src_dir}/net-profiles.tar" -C /etc/NetworkManager/system-connections --no-same-owner 2>/dev/null || true
         chown -R root:root /etc/NetworkManager/system-connections 2>/dev/null || true
         find /etc/NetworkManager/system-connections -type f -exec chmod 0600 {} + 2>/dev/null || true
+    fi
+    if [ -f "${src_dir}/bt-profiles.tar" ]; then
+        tar -xf "${src_dir}/bt-profiles.tar" -C /var/lib/bluetooth --no-same-owner 2>/dev/null || true
+        chown -R root:root /var/lib/bluetooth 2>/dev/null || true
+        chmod 0700 /var/lib/bluetooth 2>/dev/null || true
+        BT_RESTORED=1
     fi
 }
 
@@ -61,9 +75,12 @@ if [ -n "$PERSIST_DEV" ] && [ -b "$PERSIST_DEV" ] && ! findmnt -rn -S "$PERSIST_
     rmdir "$PMNT" 2>/dev/null || true
 fi
 
-# Se NetworkManager fosse già attivo, ricarica subito i profili ripristinati
+# Se NetworkManager o Bluetooth fossero già attivi, ricarica i profili ripristinati
 if systemctl is-active --quiet NetworkManager.service 2>/dev/null; then
     nmcli connection reload 2>/dev/null || true
+fi
+if [ "$BT_RESTORED" -eq 1 ] && systemctl is-active --quiet bluetooth.service 2>/dev/null; then
+    systemctl restart bluetooth.service 2>/dev/null || true
 fi
 
 exit 0
