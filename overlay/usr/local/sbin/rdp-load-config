@@ -1,24 +1,69 @@
 #!/bin/bash
-# Carica all'avvio la configurazione persistente (IP, Dominio, Utente)
-# dalla partizione dedicata RDPOS_CFG presente sulle chiavette USB Rufus / BalenaEtcher.
+# Carica all'avvio la configurazione persistente (Server RDP, Dominio, Utente,
+# reti Wi-Fi e impostazioni IP Statico / DNS) sia da Disco Interno, sia da
+# Chiavetta USB Rufus (FAT32 / persistence / partizione dedicata RDPOS_CFG).
 
 set -uo pipefail
 
-mkdir -p /var/lib/rdp-kiosk
+mkdir -p /var/lib/rdp-kiosk /etc/NetworkManager/system-connections
 udevadm settle --timeout=5 2>/dev/null || true
 
+# Sblocca eventuali blocchi software radio Wi-Fi
+if command -v rfkill >/dev/null 2>&1; then
+    rfkill unblock wifi 2>/dev/null || true
+fi
+
+restore_from_dir() {
+    local src_dir="$1"
+    if [ -f "${src_dir}/rdp-kiosk.conf" ]; then
+        cp -f "${src_dir}/rdp-kiosk.conf" "/var/lib/rdp-kiosk/saved-target.conf"
+        chmod 0644 "/var/lib/rdp-kiosk/saved-target.conf"
+    fi
+    if [ -f "${src_dir}/net-profiles.tar" ]; then
+        tar -xf "${src_dir}/net-profiles.tar" -C /etc/NetworkManager/system-connections --no-same-owner 2>/dev/null || true
+        chown -R root:root /etc/NetworkManager/system-connections 2>/dev/null || true
+        find /etc/NetworkManager/system-connections -type f -exec chmod 0600 {} + 2>/dev/null || true
+    fi
+}
+
+# 1. Verifica prima il supporto Live montato (Disco Interno RDPOS_ROOT o Rufus ISO FAT32)
+for medium in /run/live/medium /lib/live/mount/medium; do
+    if [ -d "$medium" ]; then
+        restore_from_dir "$medium"
+    fi
+done
+
+# 2. Verifica la partizione dedicata RDPOS_CFG (Rufus DD / BalenaEtcher / ISO ibrida)
 CFG_DEV="$(blkid -L RDPOS_CFG 2>/dev/null | head -n1 || true)"
 if [ -n "$CFG_DEV" ] && [ -b "$CFG_DEV" ]; then
     MNT="/mnt/rdpos_cfg_ro"
     mkdir -p "$MNT"
     if mount -o ro "$CFG_DEV" "$MNT" 2>/dev/null; then
-        if [ -f "${MNT}/rdp-kiosk.conf" ]; then
-            cp -f "${MNT}/rdp-kiosk.conf" "/var/lib/rdp-kiosk/saved-target.conf"
-            chmod 0644 "/var/lib/rdp-kiosk/saved-target.conf"
-        fi
+        restore_from_dir "$MNT"
         umount "$MNT" 2>/dev/null || true
     fi
     rmdir "$MNT" 2>/dev/null || true
+fi
+
+# 3. Se l'utente ha creato in Rufus una partizione 'persistence' vuota senza persistence.conf,
+# la inizializza automaticamente per i riavvii successivi.
+PERSIST_DEV="$(blkid -L persistence 2>/dev/null | head -n1 || true)"
+if [ -n "$PERSIST_DEV" ] && [ -b "$PERSIST_DEV" ] && ! findmnt -rn -S "$PERSIST_DEV" >/dev/null 2>&1; then
+    PMNT="/mnt/rdpos_persist_init"
+    mkdir -p "$PMNT"
+    if mount -o rw "$PERSIST_DEV" "$PMNT" 2>/dev/null; then
+        if [ ! -f "${PMNT}/persistence.conf" ]; then
+            echo "/ union" > "${PMNT}/persistence.conf"
+            sync
+        fi
+        umount "$PMNT" 2>/dev/null || true
+    fi
+    rmdir "$PMNT" 2>/dev/null || true
+fi
+
+# Se NetworkManager fosse già attivo, ricarica subito i profili ripristinati
+if systemctl is-active --quiet NetworkManager.service 2>/dev/null; then
+    nmcli connection reload 2>/dev/null || true
 fi
 
 exit 0

@@ -7,6 +7,7 @@ Progettata per avvio diretto su X11 senza desktop environment.
 
 import configparser
 import datetime
+import json
 import os
 import shlex
 import shutil
@@ -15,6 +16,20 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+try:
+    from smartcard.scard import (
+        SCARD_SCOPE_SYSTEM,
+        SCARD_STATE_PRESENT,
+        SCARD_STATE_UNAWARE,
+        SCardEstablishContext,
+        SCardGetStatusChange,
+        SCardListReaders,
+        SCardReleaseContext,
+    )
+    HAS_PYSCARD = True
+except Exception:
+    HAS_PYSCARD = False
 
 import gi
 
@@ -82,6 +97,73 @@ window.kiosk-window {
     background-color: rgba(239, 68, 68, 0.16);
     color: #f87171;
     border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.status-muted {
+    background-color: rgba(148, 163, 184, 0.12);
+    color: #94a3b8;
+    border: 1px solid rgba(148, 163, 184, 0.24);
+}
+
+button.btn-topbar {
+    background-image: none;
+    background-color: rgba(37, 99, 235, 0.24);
+    color: #e0f2fe;
+    border: 1px solid rgba(96, 165, 250, 0.45);
+    border-radius: 999px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+button.btn-topbar:hover {
+    background-color: rgba(37, 99, 235, 0.42);
+}
+
+button.btn-tab {
+    background-image: none;
+    background-color: #f1f5f9;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+button.btn-tab-active {
+    background-image: none;
+    background-color: #2563eb;
+    color: #ffffff;
+    border: 1px solid #1d4ed8;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.wifi-frame {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background-color: #f8fafc;
+}
+
+.wifi-list {
+    background-color: #f8fafc;
+    color: #0f172a;
+}
+
+.wifi-row-label {
+    color: #0f172a;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 10px;
+}
+
+.alert-success {
+    background-color: #ecfdf5;
+    color: #047857;
+    border: 1px solid #a7f3d0;
 }
 
 .kbd-badge {
@@ -300,9 +382,9 @@ def detect_freerdp() -> tuple[str, bool, bool]:
     return found, found.endswith("3"), False
 
 
-def get_ethernet_status() -> tuple[str, str]:
+def get_network_status() -> tuple[str, str]:
     """
-    Restituisce (stato, testo_descrittivo) per la rete cablata:
+    Restituisce (stato, testo_descrittivo) per la rete attiva (Ethernet o Wi-Fi):
       stato in {"online", "waiting", "offline"}
     """
     try:
@@ -320,12 +402,36 @@ def get_ethernet_status() -> tuple[str, str]:
                 ip_addr = parts[3].split("/")[0]
                 ips.append((parts[1], ip_addr))
         if ips:
-            iface, ip_addr = ips[0]
-            return "online", f"● Rete Ethernet attiva ({ip_addr})"
+            # Preferisce Ethernet se entrambe collegate, altrimenti mostra Wi-Fi
+            chosen = ips[0]
+            for iface_name, ip_a in ips:
+                if not (Path("/sys/class/net") / iface_name / "wireless").exists():
+                    chosen = (iface_name, ip_a)
+                    break
+            iface, ip_addr = chosen
+            if (Path("/sys/class/net") / iface / "wireless").exists():
+                ssid = ""
+                try:
+                    wproc = subprocess.run(
+                        ["nmcli", "-t", "-f", "GENERAL.CONNECTION", "device", "show", iface],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        timeout=1.5,
+                    )
+                    for wline in (wproc.stdout or "").splitlines():
+                        if ":" in wline:
+                            cname = wline.split(":", 1)[1].strip()
+                            if cname and cname != "--":
+                                ssid = cname[5:] if cname.startswith("WiFi-") else cname
+                except Exception:
+                    pass
+                label_ssid = f" {ssid}" if ssid else ""
+                return "online", f"● Wi-Fi{label_ssid} ({ip_addr})"
+            return "online", f"● Ethernet ({ip_addr})"
     except Exception:
         pass
 
-    # Verifica presenza portante fisica (cavo collegato in attesa DHCP)
     carrier_up = False
     net_dir = Path("/sys/class/net")
     if net_dir.is_dir():
@@ -341,8 +447,37 @@ def get_ethernet_status() -> tuple[str, str]:
                 continue
 
     if carrier_up:
-        return "waiting", "● Cavo collegato — Acquisizione DHCP in corso..."
-    return "offline", "● Cavo Ethernet scollegato"
+        return "waiting", "● Acquisizione indirizzo IP in corso..."
+    return "offline", "● Rete scollegata"
+
+
+def get_smartcard_status() -> tuple[str, str, str]:
+    """
+    Verifica non intrusiva di lettori e carte Smart Card / CNS / CIE via PC/SC:
+      stato in {"online", "waiting", "muted"}
+    """
+    if not HAS_PYSCARD:
+        return "muted", "○ Smart Card assente", "Libreria PC/SC non disponibile"
+    try:
+        hres, hctx = SCardEstablishContext(SCARD_SCOPE_SYSTEM)
+        if hres != 0:
+            return "muted", "○ Smart Card assente", "Nessun lettore Smart Card collegato"
+        try:
+            hres_r, readers = SCardListReaders(hctx, [])
+            if hres_r != 0 or not readers:
+                return "muted", "○ Smart Card assente", "Nessun lettore Smart Card collegato"
+            r_names = ", ".join(str(r) for r in readers)
+            states = [(r, SCARD_STATE_UNAWARE) for r in readers]
+            hres_s, new_states = SCardGetStatusChange(hctx, 0, states)
+            if hres_s == 0:
+                for _reader, event_state, _atr in new_states:
+                    if event_state & SCARD_STATE_PRESENT:
+                        return "online", "● Smart Card pronta", f"Lettore attivo: {r_names}"
+            return "waiting", "● Lettore collegato (inserisci carta)", f"Lettore rilevato: {r_names}"
+        finally:
+            SCardReleaseContext(hctx)
+    except Exception:
+        return "muted", "○ Smart Card assente", "Servizio Smart Card pronto"
 
 
 def translate_freerdp_error(returncode: int, stderr_text: str) -> str:
@@ -390,6 +525,13 @@ class RdpKioskWindow(Gtk.Window):
         self.freerdp_bin, self.freerdp_v3, self.supports_args_from = detect_freerdp()
         self.connecting = False
         self.pending_power_action = None
+        self._status_polling = False
+        self.net_mode = "ethernet"
+        self.eth_devices: list[dict] = []
+        self.wifi_devices: list[dict] = []
+        self.wifi_networks: list[dict] = []
+        self.selected_wifi_secured = True
+        self.net_busy = False
 
         self._apply_css()
         self._configure_window()
@@ -440,10 +582,22 @@ class RdpKioskWindow(Gtk.Window):
         spacer = Gtk.Box()
         topbar.pack_start(spacer, True, True, 0)
 
-        self.net_badge = Gtk.Label(label="● Verifica rete Ethernet...")
+        self.sc_badge = Gtk.Label(label="○ Smart Card assente")
+        self.sc_badge.get_style_context().add_class("status-pill")
+        self.sc_badge.get_style_context().add_class("status-muted")
+        self.sc_badge.set_tooltip_text("Stato lettore Smart Card / CNS / CIE")
+        topbar.pack_start(self.sc_badge, False, False, 0)
+
+        self.net_badge = Gtk.Label(label="● Verifica rete...")
         self.net_badge.get_style_context().add_class("status-pill")
         self.net_badge.get_style_context().add_class("status-waiting")
         topbar.pack_start(self.net_badge, False, False, 0)
+
+        self.net_settings_btn = Gtk.Button(label="⚙ Rete / Wi-Fi")
+        self.net_settings_btn.get_style_context().add_class("btn-topbar")
+        self.net_settings_btn.set_tooltip_text("Configura Wi-Fi, IP Statico / DHCP, Gateway e Server DNS")
+        self.net_settings_btn.connect("clicked", lambda _w: self._open_network_panel())
+        topbar.pack_start(self.net_settings_btn, False, False, 0)
 
         kbd_label = Gtk.Label(label="IT")
         kbd_label.get_style_context().add_class("kbd-badge")
@@ -464,7 +618,7 @@ class RdpKioskWindow(Gtk.Window):
 
         card_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         card_frame.get_style_context().add_class("login-card")
-        card_frame.set_size_request(480, -1)
+        card_frame.set_size_request(520, -1)
         center_outer.pack_start(card_frame, False, False, 0)
 
         self.stack = Gtk.Stack()
@@ -475,6 +629,7 @@ class RdpKioskWindow(Gtk.Window):
 
         self.stack.add_named(self._build_login_form(), "login")
         self.stack.add_named(self._build_power_confirm(), "confirm_power")
+        self.stack.add_named(self._build_network_panel(), "network")
 
     def _build_login_form(self) -> Gtk.Widget:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -659,6 +814,438 @@ class RdpKioskWindow(Gtk.Window):
         vbox.pack_start(btn_row, False, False, 8)
         return vbox
 
+    def _build_network_panel(self) -> Gtk.Widget:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        # Intestazione + pulsante ritorno
+        hdr_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title_lbl = Gtk.Label(label="Impostazioni Rete e Wi-Fi")
+        title_lbl.get_style_context().add_class("card-header")
+        title_lbl.set_halign(Gtk.Align.START)
+        hdr_row.pack_start(title_lbl, True, True, 0)
+
+        back_btn = Gtk.Button(label="← Login")
+        back_btn.get_style_context().add_class("btn-secondary")
+        back_btn.connect("clicked", lambda _w: self.stack.set_visible_child_name("login"))
+        hdr_row.pack_start(back_btn, False, False, 0)
+        vbox.pack_start(hdr_row, False, False, 0)
+
+        # Banner stato pannello rete
+        self.net_banner_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.net_banner_box.get_style_context().add_class("alert-banner")
+        self.net_banner_box.set_no_show_all(True)
+        self.net_spinner = Gtk.Spinner()
+        self.net_banner_box.pack_start(self.net_spinner, False, False, 0)
+        self.net_banner_lbl = Gtk.Label(label="")
+        self.net_banner_lbl.set_line_wrap(True)
+        self.net_banner_lbl.set_max_width_chars(50)
+        self.net_banner_lbl.set_xalign(0.0)
+        self.net_banner_box.pack_start(self.net_banner_lbl, True, True, 0)
+        vbox.pack_start(self.net_banner_box, False, False, 0)
+
+        # Tab scelta interfaccia: Ethernet Cablata | Rete Wi-Fi
+        tabs_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.tab_eth_btn = Gtk.Button(label="Ethernet Cablata")
+        self.tab_eth_btn.get_style_context().add_class("btn-tab-active")
+        self.tab_eth_btn.connect("clicked", lambda _w: self._switch_net_tab("ethernet"))
+        tabs_row.pack_start(self.tab_eth_btn, True, True, 0)
+
+        self.tab_wifi_btn = Gtk.Button(label="Rete Wi-Fi")
+        self.tab_wifi_btn.get_style_context().add_class("btn-tab")
+        self.tab_wifi_btn.connect("clicked", lambda _w: self._switch_net_tab("wifi"))
+        tabs_row.pack_start(self.tab_wifi_btn, True, True, 0)
+        vbox.pack_start(tabs_row, False, False, 0)
+
+        # Contenitore specifico Wi-Fi (visibile solo su scheda Wi-Fi)
+        self.wifi_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.wifi_section.set_no_show_all(True)
+
+        wifi_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        w_lbl = Gtk.Label(label="Reti Wi-Fi rilevate")
+        w_lbl.get_style_context().add_class("field-label")
+        w_lbl.set_halign(Gtk.Align.START)
+        wifi_bar.pack_start(w_lbl, True, True, 0)
+
+        self.wifi_scan_btn = Gtk.Button(label="↻ Cerca reti")
+        self.wifi_scan_btn.get_style_context().add_class("btn-secondary")
+        self.wifi_scan_btn.connect("clicked", lambda _w: self._refresh_wifi_scan(rescan=True))
+        wifi_bar.pack_start(self.wifi_scan_btn, False, False, 0)
+
+        self.wifi_disc_btn = Gtk.Button(label="Disconnetti")
+        self.wifi_disc_btn.get_style_context().add_class("btn-danger")
+        self.wifi_disc_btn.connect("clicked", lambda _w: self._on_disconnect_wifi())
+        wifi_bar.pack_start(self.wifi_disc_btn, False, False, 0)
+        self.wifi_section.pack_start(wifi_bar, False, False, 0)
+
+        sc_win = Gtk.ScrolledWindow()
+        sc_win.get_style_context().add_class("wifi-frame")
+        sc_win.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc_win.set_min_content_height(115)
+        sc_win.set_max_content_height(115)
+
+        self.wifi_listbox = Gtk.ListBox()
+        self.wifi_listbox.get_style_context().add_class("wifi-list")
+        self.wifi_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.wifi_listbox.connect("row-selected", self._on_wifi_row_selected)
+        sc_win.add(self.wifi_listbox)
+        self.wifi_section.pack_start(sc_win, False, False, 0)
+
+        wifi_creds_grid = Gtk.Grid(column_spacing=10, row_spacing=4)
+        ssid_lbl = Gtk.Label(label="Nome rete (SSID)")
+        ssid_lbl.get_style_context().add_class("field-label")
+        ssid_lbl.set_halign(Gtk.Align.START)
+        psk_lbl = Gtk.Label(label="Password Wi-Fi")
+        psk_lbl.get_style_context().add_class("field-label")
+        psk_lbl.set_halign(Gtk.Align.START)
+
+        self.wifi_ssid_entry = Gtk.Entry()
+        self.wifi_ssid_entry.get_style_context().add_class("kiosk-entry")
+        self.wifi_ssid_entry.set_placeholder_text("SSID rete Wi-Fi")
+        self.wifi_ssid_entry.set_hexpand(True)
+
+        self.wifi_psk_entry = Gtk.Entry()
+        self.wifi_psk_entry.get_style_context().add_class("kiosk-entry")
+        self.wifi_psk_entry.set_placeholder_text("Password (vuoto se già salvata/aperta)")
+        self.wifi_psk_entry.set_hexpand(True)
+        self.wifi_psk_entry.set_visibility(False)
+        self.wifi_psk_entry.set_invisible_char("●")
+        self.wifi_psk_entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
+        )
+        self.wifi_psk_entry.connect("icon-press", self._on_toggle_password_visibility)
+
+        wifi_creds_grid.attach(ssid_lbl, 0, 0, 1, 1)
+        wifi_creds_grid.attach(psk_lbl, 1, 0, 1, 1)
+        wifi_creds_grid.attach(self.wifi_ssid_entry, 0, 1, 1, 1)
+        wifi_creds_grid.attach(self.wifi_psk_entry, 1, 1, 1, 1)
+        self.wifi_section.pack_start(wifi_creds_grid, False, False, 0)
+
+        vbox.pack_start(self.wifi_section, False, False, 0)
+
+        # Configurazione IPv4 (comune a Ethernet e Wi-Fi)
+        mode_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        m_lbl = Gtk.Label(label="Configurazione IPv4:")
+        m_lbl.get_style_context().add_class("field-label")
+        m_lbl.set_halign(Gtk.Align.START)
+        mode_row.pack_start(m_lbl, False, False, 0)
+
+        self.ipv4_mode_combo = Gtk.ComboBoxText()
+        self.ipv4_mode_combo.append("dhcp", "Automatico (DHCP)")
+        self.ipv4_mode_combo.append("manual", "Manuale (IP Statico)")
+        self.ipv4_mode_combo.set_active_id("dhcp")
+        self.ipv4_mode_combo.connect("changed", lambda _w: self._update_ipv4_fields_sensitivity())
+        mode_row.pack_start(self.ipv4_mode_combo, True, True, 0)
+        vbox.pack_start(mode_row, False, False, 0)
+
+        ip_grid = Gtk.Grid(column_spacing=10, row_spacing=6)
+
+        def _grid_lbl(txt: str) -> Gtk.Label:
+            l_w = Gtk.Label(label=txt)
+            l_w.get_style_context().add_class("field-label")
+            l_w.set_halign(Gtk.Align.START)
+            return l_w
+
+        def _grid_entry(ph: str) -> Gtk.Entry:
+            e_w = Gtk.Entry()
+            e_w.get_style_context().add_class("kiosk-entry")
+            e_w.set_placeholder_text(ph)
+            e_w.set_hexpand(True)
+            return e_w
+
+        self.net_ip_entry = _grid_entry("es. 192.168.1.50")
+        self.net_mask_entry = _grid_entry("es. 255.255.255.0 o 24")
+        self.net_gw_entry = _grid_entry("es. 192.168.1.1")
+        self.net_dns_entry = _grid_entry("es. 192.168.1.10, 8.8.8.8")
+
+        ip_grid.attach(_grid_lbl("Indirizzo IP"), 0, 0, 1, 1)
+        ip_grid.attach(_grid_lbl("Subnet Mask / Prefisso"), 1, 0, 1, 1)
+        ip_grid.attach(self.net_ip_entry, 0, 1, 1, 1)
+        ip_grid.attach(self.net_mask_entry, 1, 1, 1, 1)
+
+        ip_grid.attach(_grid_lbl("Gateway"), 0, 2, 1, 1)
+        ip_grid.attach(_grid_lbl("Server DNS (opzionale in DHCP)"), 1, 2, 1, 1)
+        ip_grid.attach(self.net_gw_entry, 0, 3, 1, 1)
+        ip_grid.attach(self.net_dns_entry, 1, 3, 1, 1)
+
+        vbox.pack_start(ip_grid, False, False, 0)
+
+        # Barra pulsanti salvataggio rete
+        foot_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        close_btn = Gtk.Button(label="Chiudi")
+        close_btn.get_style_context().add_class("btn-secondary")
+        close_btn.connect("clicked", lambda _w: self.stack.set_visible_child_name("login"))
+        foot_row.pack_start(close_btn, False, False, 0)
+
+        f_spacer = Gtk.Box()
+        foot_row.pack_start(f_spacer, True, True, 0)
+
+        self.net_apply_btn = Gtk.Button(label="Applica e Salva")
+        self.net_apply_btn.get_style_context().add_class("btn-connect")
+        self.net_apply_btn.connect("clicked", lambda _w: self._on_apply_network())
+        foot_row.pack_start(self.net_apply_btn, False, False, 0)
+
+        vbox.pack_start(foot_row, False, False, 2)
+        self._update_ipv4_fields_sensitivity()
+        return vbox
+
+    def _show_net_banner(self, msg: str, kind: str = "info", spinning: bool = False) -> None:
+        ctx = self.net_banner_box.get_style_context()
+        for c in ("alert-error", "alert-info", "alert-success"):
+            ctx.remove_class(c)
+        ctx.add_class(f"alert-{kind}")
+        self.net_banner_lbl.set_text(msg)
+        if spinning:
+            self.net_spinner.show()
+            self.net_spinner.start()
+        else:
+            self.net_spinner.stop()
+            self.net_spinner.hide()
+        self.net_banner_lbl.show()
+        self.net_banner_box.show()
+
+    def _hide_net_banner(self) -> None:
+        self.net_spinner.stop()
+        self.net_banner_box.hide()
+
+    def _run_net_helper(self, args: list[str], stdin_data: str = "", timeout: int = 28) -> dict:
+        try:
+            proc = subprocess.run(
+                ["sudo", "-n", "/usr/local/sbin/rdp-net-helper", *args],
+                input=stdin_data if stdin_data else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            out = (proc.stdout or "").strip()
+            if out:
+                return json.loads(out.splitlines()[-1])
+            err = (proc.stderr or "").strip()
+            return {"ok": False, "error": err or f"Errore helper di rete (codice {proc.returncode})."}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _update_ipv4_fields_sensitivity(self) -> None:
+        is_manual = self.ipv4_mode_combo.get_active_id() == "manual"
+        self.net_ip_entry.set_sensitive(is_manual)
+        self.net_mask_entry.set_sensitive(is_manual)
+        self.net_gw_entry.set_sensitive(is_manual)
+        self.net_dns_entry.set_sensitive(True)
+
+    def _open_network_panel(self) -> None:
+        if self.connecting:
+            return
+        self._hide_net_banner()
+        self.stack.set_visible_child_name("network")
+
+        def _load_init() -> None:
+            res = self._run_net_helper(["interfaces"], timeout=8)
+            self.eth_devices = res.get("ethernet", [])
+            self.wifi_devices = res.get("wifi", [])
+            active_ssid = res.get("active_wifi_ssid", "")
+
+            # Se non c'è Ethernet attiva ma c'è Wi-Fi disponibile/attiva, apre direttamente Wi-Fi
+            eth_online = any(d.get("state") == "connected" for d in self.eth_devices)
+            prefer_mode = "wifi" if (not eth_online and self.wifi_devices) else "ethernet"
+            GLib.idle_add(self._finish_open_network_panel, prefer_mode, active_ssid)
+
+        threading.Thread(target=_load_init, daemon=True).start()
+
+    def _finish_open_network_panel(self, prefer_mode: str, active_ssid: str) -> bool:
+        if active_ssid and not self.wifi_ssid_entry.get_text().strip():
+            self.wifi_ssid_entry.set_text(active_ssid)
+        self._switch_net_tab(prefer_mode)
+        return False
+
+    def _switch_net_tab(self, mode: str) -> None:
+        self.net_mode = mode
+        for btn, is_active in (
+            (self.tab_eth_btn, mode == "ethernet"),
+            (self.tab_wifi_btn, mode == "wifi"),
+        ):
+            ctx = btn.get_style_context()
+            ctx.remove_class("btn-tab")
+            ctx.remove_class("btn-tab-active")
+            ctx.add_class("btn-tab-active" if is_active else "btn-tab")
+
+        if mode == "wifi":
+            for child in self.wifi_section.get_children():
+                child.show_all()
+            self.wifi_section.show()
+            if not self.wifi_devices:
+                self._show_net_banner("Nessuna scheda Wi-Fi rilevata su questa postazione.", kind="error")
+            else:
+                self._refresh_wifi_scan(rescan=False)
+        else:
+            self.wifi_section.hide()
+            if not self.eth_devices:
+                self._show_net_banner("Nessuna scheda Ethernet rilevata.", kind="error")
+            else:
+                self._hide_net_banner()
+
+        self._load_current_ipv4_async()
+
+    def _load_current_ipv4_async(self) -> None:
+        mode = self.net_mode
+        devs = self.eth_devices if mode == "ethernet" else self.wifi_devices
+        if not devs:
+            return
+        dev_info = devs[0]
+        dev_name = dev_info.get("device", "")
+        conn_name = dev_info.get("connection", "")
+        if conn_name == "--":
+            conn_name = ""
+        if mode == "wifi" and not conn_name:
+            ssid = self.wifi_ssid_entry.get_text().strip()
+            if ssid:
+                conn_name = f"WiFi-{ssid}"
+
+        def _worker() -> None:
+            info = self._run_net_helper(["get-ipv4", conn_name, dev_name], timeout=8)
+            GLib.idle_add(self._populate_ipv4_fields, info)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _populate_ipv4_fields(self, info: dict) -> bool:
+        if not info.get("ok"):
+            return False
+        method = info.get("method", "dhcp")
+        self.ipv4_mode_combo.set_active_id("manual" if method == "manual" else "dhcp")
+        self.net_ip_entry.set_text(info.get("ip", ""))
+        self.net_mask_entry.set_text(info.get("netmask", "255.255.255.0"))
+        self.net_gw_entry.set_text(info.get("gateway", ""))
+        self.net_dns_entry.set_text(info.get("dns", ""))
+        self._update_ipv4_fields_sensitivity()
+        return False
+
+    def _refresh_wifi_scan(self, rescan: bool = True) -> None:
+        if not self.wifi_devices or self.net_busy:
+            return
+        self._show_net_banner("Ricerca reti Wi-Fi in corso...", kind="info", spinning=True)
+
+        def _scan_worker() -> None:
+            res = self._run_net_helper(["scan-wifi", "1" if rescan else "0"], timeout=18)
+            GLib.idle_add(self._populate_wifi_list, res)
+
+        threading.Thread(target=_scan_worker, daemon=True).start()
+
+    def _populate_wifi_list(self, res: dict) -> bool:
+        for row in self.wifi_listbox.get_children():
+            self.wifi_listbox.remove(row)
+        self._hide_net_banner()
+
+        if not res.get("ok"):
+            self._show_net_banner(res.get("error", "Impossibile eseguire la scansione Wi-Fi."), kind="error")
+            return False
+
+        self.wifi_networks = res.get("networks", [])
+        if not self.wifi_networks:
+            placeholder = Gtk.Label(label="Nessuna rete Wi-Fi trovata. Premi 'Cerca reti'.")
+            placeholder.get_style_context().add_class("wifi-row-label")
+            self.wifi_listbox.add(placeholder)
+            self.wifi_listbox.show_all()
+            return False
+
+        for net in self.wifi_networks:
+            row = Gtk.ListBoxRow()
+            row.wifi_data = net
+            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            mark = "✓ " if net.get("active") else "   "
+            lock = "🔒" if net.get("secured") else "🔓"
+            ssid_lbl = Gtk.Label(label=f"{mark}{net['ssid']}")
+            ssid_lbl.get_style_context().add_class("wifi-row-label")
+            ssid_lbl.set_halign(Gtk.Align.START)
+            hbox.pack_start(ssid_lbl, True, True, 0)
+
+            meta_lbl = Gtk.Label(label=f"{net['signal']}%  {lock}")
+            meta_lbl.get_style_context().add_class("wifi-row-label")
+            hbox.pack_start(meta_lbl, False, False, 0)
+            row.add(hbox)
+            self.wifi_listbox.add(row)
+
+        self.wifi_listbox.show_all()
+        return False
+
+    def _on_wifi_row_selected(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
+        if row is None or not hasattr(row, "wifi_data"):
+            return
+        data = row.wifi_data
+        self.wifi_ssid_entry.set_text(data.get("ssid", ""))
+        self.selected_wifi_secured = bool(data.get("secured", True))
+        self.wifi_psk_entry.set_text("")
+        if self.selected_wifi_secured:
+            self.wifi_psk_entry.grab_focus()
+        self._load_current_ipv4_async()
+
+    def _on_disconnect_wifi(self) -> None:
+        if not self.wifi_devices or self.net_busy:
+            return
+        dev = self.wifi_devices[0].get("device", "")
+        self._show_net_banner("Disconnessione Wi-Fi in corso...", kind="info", spinning=True)
+
+        def _disc() -> None:
+            self._run_net_helper(["disconnect-wifi", dev], timeout=10)
+            GLib.idle_add(self._on_wifi_disconnected)
+
+        threading.Thread(target=_disc, daemon=True).start()
+
+    def _on_wifi_disconnected(self) -> bool:
+        self._show_net_banner("Wi-Fi disconnesso.", kind="info", spinning=False)
+        self._trigger_status_poll()
+        self._refresh_wifi_scan(rescan=False)
+        return False
+
+    def _on_apply_network(self) -> None:
+        if self.net_busy:
+            return
+        devs = self.eth_devices if self.net_mode == "ethernet" else self.wifi_devices
+        if not devs:
+            self._show_net_banner("Nessuna scheda di rete disponibile per questa modalità.", kind="error")
+            return
+
+        payload = {
+            "type": self.net_mode,
+            "device": devs[0].get("device", ""),
+            "ipv4_method": self.ipv4_mode_combo.get_active_id() or "dhcp",
+            "ip": self.net_ip_entry.get_text().strip(),
+            "netmask": self.net_mask_entry.get_text().strip() or "255.255.255.0",
+            "gateway": self.net_gw_entry.get_text().strip(),
+            "dns": self.net_dns_entry.get_text().strip(),
+            "ssid": self.wifi_ssid_entry.get_text().strip(),
+            "password": self.wifi_psk_entry.get_text(),
+            "secured": self.selected_wifi_secured,
+        }
+
+        self.net_busy = True
+        self.net_apply_btn.set_sensitive(False)
+        self._show_net_banner(
+            "Applicazione parametri di rete e salvataggio permanente in corso...",
+            kind="info",
+            spinning=True,
+        )
+
+        def _apply_worker() -> None:
+            res = self._run_net_helper(["apply"], stdin_data=json.dumps(payload), timeout=30)
+            GLib.idle_add(self._on_apply_network_finished, res)
+
+        threading.Thread(target=_apply_worker, daemon=True).start()
+
+    def _on_apply_network_finished(self, res: dict) -> bool:
+        self.net_busy = False
+        self.net_apply_btn.set_sensitive(True)
+        self.wifi_psk_entry.set_text("")
+        self._trigger_status_poll()
+
+        if not res.get("ok"):
+            self._show_net_banner(res.get("error", "Errore configurazione rete."), kind="error", spinning=False)
+            return False
+
+        warn = res.get("warning", "")
+        msg = warn if warn else "Impostazioni di rete applicate e memorizzate con successo!"
+        self._show_net_banner(msg, kind="success", spinning=False)
+        return False
+
     def _prompt_power_action(self, action: str) -> None:
         if self.connecting:
             return
@@ -722,14 +1309,41 @@ class RdpKioskWindow(Gtk.Window):
     def _update_status_bar(self) -> bool:
         now_str = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M")
         self.clock_label.set_text(now_str)
-
-        state, net_text = get_ethernet_status()
-        self.net_badge.set_text(net_text)
-        ctx = self.net_badge.get_style_context()
-        for cls in ("status-online", "status-waiting", "status-offline"):
-            ctx.remove_class(cls)
-        ctx.add_class(f"status-{state}")
+        if not self.connecting:
+            self._trigger_status_poll()
         return True
+
+    def _trigger_status_poll(self) -> None:
+        if self._status_polling:
+            return
+        self._status_polling = True
+
+        def _poll_worker() -> None:
+            try:
+                net_state, net_text = get_network_status()
+                sc_state, sc_text, sc_tip = get_smartcard_status()
+                GLib.idle_add(self._apply_status_badges, net_state, net_text, sc_state, sc_text, sc_tip)
+            finally:
+                self._status_polling = False
+
+        threading.Thread(target=_poll_worker, daemon=True).start()
+
+    def _apply_status_badges(
+        self, net_state: str, net_text: str, sc_state: str, sc_text: str, sc_tip: str
+    ) -> bool:
+        self.net_badge.set_text(net_text)
+        n_ctx = self.net_badge.get_style_context()
+        for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
+            n_ctx.remove_class(cls)
+        n_ctx.add_class(f"status-{net_state}")
+
+        self.sc_badge.set_text(sc_text)
+        self.sc_badge.set_tooltip_text(sc_tip)
+        s_ctx = self.sc_badge.get_style_context()
+        for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
+            s_ctx.remove_class(cls)
+        s_ctx.add_class(f"status-{sc_state}")
+        return False
 
     def _show_banner(self, message: str, is_error: bool = True, spinning: bool = False) -> None:
         ctx = self.banner_box.get_style_context()
@@ -762,6 +1376,7 @@ class RdpKioskWindow(Gtk.Window):
             self.clear_btn,
             self.reboot_btn,
             self.poweroff_btn,
+            self.net_settings_btn,
         ):
             widget.set_sensitive(enabled)
 
@@ -787,9 +1402,12 @@ class RdpKioskWindow(Gtk.Window):
             shutil.rmtree(freerdp_cfg, ignore_errors=True)
 
     def clear_form_fields(self) -> None:
-        """Svuota manualmente tutti i campi a schermo per permettere una nuova immissione."""
+        """Svuota manualmente tutti i campi a schermo e azzera i dati memorizzati."""
         self._scrub_session_artifacts()
         self._hide_banner()
+        self.config["default_server"] = ""
+        self.config["default_domain"] = ""
+        self.config["default_user"] = ""
         self.server_entry.set_text("")
         self.domain_entry.set_text("")
         self.user_entry.set_text("")
@@ -798,6 +1416,17 @@ class RdpKioskWindow(Gtk.Window):
         self.pass_entry.set_icon_from_icon_name(
             Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
         )
+        threading.Thread(
+            target=lambda: subprocess.run(
+                ["sudo", "-n", "/usr/local/sbin/rdp-save-target", "", "", ""],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+                check=False,
+            ),
+            daemon=True,
+        ).start()
         self.server_entry.grab_focus()
 
     def reset_mask(self, initial: bool = False) -> None:
@@ -887,10 +1516,10 @@ class RdpKioskWindow(Gtk.Window):
             self.pass_entry.grab_focus()
             return
 
-        net_state, _ = get_ethernet_status()
+        net_state, _ = get_network_status()
         if net_state != "online":
             self._show_banner(
-                "Rete Ethernet non pronta. Verifica il cavo di rete e l'assegnazione DHCP.",
+                "Rete non connessa. Premi '⚙ Rete / Wi-Fi' in alto o verifica il cavo Ethernet.",
                 is_error=True,
             )
             return

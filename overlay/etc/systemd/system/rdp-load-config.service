@@ -1,8 +1,9 @@
 [Unit]
-Description=Caricamento configurazione persistente Thin Client RDP da USB (RDPOS_CFG)
+Description=Caricamento configurazione persistente Thin Client RDP e Rete/Wi-Fi
 DefaultDependencies=no
 After=systemd-udevd.service local-fs.target
-Before=getty@tty1.service
+Before=NetworkManager.service NetworkManager-pre.target getty@tty1.service
+Wants=NetworkManager-pre.target
 
 [Service]
 Type=oneshot
@@ -10,4 +11,4 @@ RemainAfterExit=yes
 ExecStart=/usr/local/sbin/rdp-load-config
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target NetworkManager.service

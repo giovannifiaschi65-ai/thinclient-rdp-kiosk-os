@@ -1,2 +1,2 @@
 Defaults:kiosk !requiretty
-kiosk ALL=(root) NOPASSWD: /usr/local/sbin/rdp-power-action, /usr/bin/plymouth, /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff -i, /usr/bin/systemctl reboot -i, /usr/local/sbin/rdp-install-disk, /usr/local/sbin/rdp-save-target, /usr/local/sbin/kiosk-printer-autoconfig
+kiosk ALL=(root) NOPASSWD: /usr/local/sbin/rdp-power-action, /usr/local/sbin/rdp-net-helper, /usr/local/sbin/rdp-sync-netconfig, /usr/bin/plymouth, /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff -i, /usr/bin/systemctl reboot -i, /usr/local/sbin/rdp-install-disk, /usr/local/sbin/rdp-save-target, /usr/local/sbin/kiosk-printer-autoconfig

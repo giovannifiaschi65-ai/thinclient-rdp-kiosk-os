@@ -1,0 +1,13 @@
+# Disabilita il risparmio energetico USB (autosuspend) sui lettori Smart Card / Token CNS / CIE
+# per evitare disconnessioni o mancato riconoscimento durante l'uso in Desktop Remoto.
+
+ACTION!="add|change", GOTO="kiosk_smartcard_end"
+SUBSYSTEM!="usb", GOTO="kiosk_smartcard_end"
+
+# Qualsiasi interfaccia USB di classe CCID Smart Card (0x0b) -> forza alimentazione attiva sul device padre
+ENV{ID_USB_INTERFACES}=="*:0b0000:*", TEST=="power/control", ATTR{power/control}="on"
+
+# Vendor noti di lettori Smart Card / Token (ACS, SCM/Identiv, HID Omnikey, Gemalto/Thales, Bit4id, ReinerSCT, Cherry)
+ATTR{idVendor}=="072f|04e6|076b|08e6|25dd|0c4b|046a|0bda", TEST=="power/control", ATTR{power/control}="on"
+
+LABEL="kiosk_smartcard_end"

@@ -1,0 +1,69 @@
+#!/bin/bash
+# Sincronizza i profili di rete NetworkManager (Ethernet, Wi-Fi, IP Statici, DNS)
+# su tutte le destinazioni persistenti disponibili (Disco Interno, Rufus FAT32/persistence e RDPOS_CFG).
+
+set -uo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    exit 1
+fi
+
+NM_DIR="/etc/NetworkManager/system-connections"
+mkdir -p "$NM_DIR" "/var/lib/rdp-kiosk"
+
+TMP_TAR="/var/lib/rdp-kiosk/net-profiles.tar.tmp.$$"
+FINAL_TAR="/var/lib/rdp-kiosk/net-profiles.tar"
+
+tar -cf "$TMP_TAR" -C "$NM_DIR" . 2>/dev/null || exit 0
+chmod 0600 "$TMP_TAR"
+mv -f "$TMP_TAR" "$FINAL_TAR"
+
+copy_tar_to_dir() {
+    local dest_dir="$1"
+    local tmp_dest="${dest_dir}/net-profiles.tar.tmp.$$"
+    if cp -f "$FINAL_TAR" "$tmp_dest" 2>/dev/null; then
+        mv -f "$tmp_dest" "${dest_dir}/net-profiles.tar" 2>/dev/null || true
+    fi
+}
+
+# 1. Salva sulla partizione dedicata RDPOS_CFG (Rufus DD / BalenaEtcher / ISO ibrida)
+CFG_DEV="$(blkid -L RDPOS_CFG 2>/dev/null | head -n1 || true)"
+if [ -n "$CFG_DEV" ] && [ -b "$CFG_DEV" ]; then
+    CFG_MNT="/mnt/rdpos_cfg_net_rw"
+    mkdir -p "$CFG_MNT"
+    if mount -o rw,nosuid,nodev,noexec "$CFG_DEV" "$CFG_MNT" 2>/dev/null; then
+        copy_tar_to_dir "$CFG_MNT"
+        sync
+        umount "$CFG_MNT" 2>/dev/null || true
+    fi
+    rmdir "$CFG_MNT" 2>/dev/null || true
+fi
+
+# 2. Salva su Disco Interno installato (ext4) o Chiavetta USB Rufus in modalità ISO (FAT32)
+for medium in /run/live/medium /lib/live/mount/medium; do
+    if mountpoint -q "$medium" 2>/dev/null; then
+        fstype="$(findmnt -n -o FSTYPE "$medium" 2>/dev/null || true)"
+        case "$fstype" in
+            iso9660|udf|squashfs)
+                continue
+                ;;
+        esac
+
+        was_ro=0
+        opts="$(findmnt -n -o OPTIONS "$medium" 2>/dev/null || true)"
+        if echo ",${opts}," | grep -q ",ro,"; then
+            was_ro=1
+            mount -o remount,rw "$medium" 2>/dev/null || continue
+        fi
+
+        copy_tar_to_dir "$medium"
+        sync
+
+        if [ "$was_ro" -eq 1 ]; then
+            mount -o remount,ro "$medium" 2>/dev/null || true
+        fi
+        break
+    fi
+done
+
+exit 0

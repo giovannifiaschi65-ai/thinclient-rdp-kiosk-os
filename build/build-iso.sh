@@ -76,6 +76,7 @@ cat > "${CHROOT_DIR}/etc/apt/sources.list" <<EOF
 deb http://deb.debian.org/debian ${DEBIAN_RELEASE} main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian-security ${DEBIAN_RELEASE}-security main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian ${DEBIAN_RELEASE}-updates main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian ${DEBIAN_RELEASE}-backports main contrib non-free non-free-firmware
 EOF
 
 # Impedisce l'avvio di demoni durante l'installazione dei pacchetti nel chroot
@@ -132,8 +133,15 @@ apt-get install -y --no-install-recommends \
     firmware-linux-free \
     firmware-misc-nonfree \
     firmware-realtek \
+    firmware-iwlwifi \
+    firmware-atheros \
+    firmware-brcm80211 \
+    firmware-mediatek \
     firmware-amd-graphics \
     network-manager \
+    wpasupplicant \
+    wireless-regdb \
+    rfkill \
     iproute2 \
     iputils-ping \
     isc-dhcp-client \
@@ -171,7 +179,6 @@ apt-get install -y --no-install-recommends \
     fonts-cantarell \
     fonts-dejavu-core \
     fonts-liberation2 \
-    freerdp2-x11 \
     pulseaudio \
     libpulse0 \
     alsa-utils \
@@ -198,6 +205,11 @@ apt-get install -y --no-install-recommends \
     pcscd \
     libpcsclite1 \
     libccid \
+    libacsccid1 \
+    opensc \
+    opensc-pkcs11 \
+    pcsc-tools \
+    python3-pyscard \
     sudo \
     util-linux \
     procps \
@@ -215,7 +227,15 @@ apt-get install -y --no-install-recommends \
     grub-efi-amd64-bin \
     grub-efi-ia32-bin \
     efibootmgr \
-    dialog
+    dialog \
+    tar
+
+# Installa FreeRDP 3 da bookworm-backports (migliore supporto hotplug Smart Card / USB)
+apt-get install -y --no-install-recommends -t bookworm-backports freerdp3-x11 \
+    || apt-get install -y --no-install-recommends freerdp2-x11
+
+# Driver opzionale aggiuntivo per lettori Reiner SCT cyberJack
+apt-get install -y --no-install-recommends libifd-cyberjack6 || true
 
 # Configura lingua e localizzazione italiana
 sed -i 's/^# *\(it_IT.UTF-8 UTF-8\)/\1/' /etc/locale.gen
@@ -235,7 +255,34 @@ rm -rf /var/lib/apt/lists/*
 CHROOT_PKG
 
 echo "==> [5/8] Copia file overlay Kiosk e configurazione sicurezza/rete..."
-cp -a "${PROJECT_ROOT}/overlay/." "${CHROOT_DIR}/"
+cp -r --no-preserve=ownership "${PROJECT_ROOT}/overlay/." "${CHROOT_DIR}/"
+
+# Proprietario root:root rigoroso su tutti i file di sistema copiati dall'overlay
+chown -R root:root \
+    "${CHROOT_DIR}/etc/rdp-kiosk" \
+    "${CHROOT_DIR}/etc/sudoers.d" \
+    "${CHROOT_DIR}/etc/systemd/system" \
+    "${CHROOT_DIR}/etc/udev/rules.d" \
+    "${CHROOT_DIR}/etc/modprobe.d" \
+    "${CHROOT_DIR}/etc/X11" \
+    "${CHROOT_DIR}/etc/xdg" \
+    "${CHROOT_DIR}/usr/local/bin" \
+    "${CHROOT_DIR}/usr/local/sbin"
+
+# Permessi rigorosi per polkitd (necessari affinché pcscd e NetworkManager leggano le regole)
+if getent group polkitd >/dev/null 2>&1; then
+    chown root:polkitd "${CHROOT_DIR}/etc/polkit-1/rules.d"
+    chmod 0750 "${CHROOT_DIR}/etc/polkit-1/rules.d"
+else
+    chown root:root "${CHROOT_DIR}/etc/polkit-1/rules.d"
+    chmod 0755 "${CHROOT_DIR}/etc/polkit-1/rules.d"
+fi
+chown root:root "${CHROOT_DIR}/etc/polkit-1/rules.d/50-kiosk-pcsc.rules"
+chmod 0644 "${CHROOT_DIR}/etc/polkit-1/rules.d/50-kiosk-pcsc.rules"
+mkdir -p "${CHROOT_DIR}/usr/share/polkit-1/rules.d"
+cp -f "${CHROOT_DIR}/etc/polkit-1/rules.d/50-kiosk-pcsc.rules" "${CHROOT_DIR}/usr/share/polkit-1/rules.d/50-kiosk-pcsc.rules"
+chown root:root "${CHROOT_DIR}/usr/share/polkit-1/rules.d/50-kiosk-pcsc.rules"
+chmod 0644 "${CHROOT_DIR}/usr/share/polkit-1/rules.d/50-kiosk-pcsc.rules"
 
 # Permessi rigorosi per eseguibili e sudoers
 mkdir -p "${CHROOT_DIR}/var/lib/rdp-kiosk" "${CHROOT_DIR}/media"
@@ -244,6 +291,8 @@ chmod 0755 \
     "${CHROOT_DIR}/usr/local/bin/kiosk-xsession" \
     "${CHROOT_DIR}/usr/local/bin/rdp-kiosk-ui" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-power-action" \
+    "${CHROOT_DIR}/usr/local/sbin/rdp-net-helper" \
+    "${CHROOT_DIR}/usr/local/sbin/rdp-sync-netconfig" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-install-disk" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-save-target" \
     "${CHROOT_DIR}/usr/local/sbin/rdp-load-config" \
@@ -269,11 +318,14 @@ EOF
 
 # Verifica sintassi script e configurazione sudoers nel chroot
 chroot "${CHROOT_DIR}" /usr/sbin/visudo -cf /etc/sudoers.d/kiosk-power
-chroot "${CHROOT_DIR}" /usr/bin/python3 -m py_compile /usr/local/bin/rdp-kiosk-ui
+chroot "${CHROOT_DIR}" /usr/bin/python3 -m py_compile \
+    /usr/local/bin/rdp-kiosk-ui \
+    /usr/local/sbin/rdp-net-helper
 chroot "${CHROOT_DIR}" /bin/bash -n \
     /usr/local/bin/kiosk-tty-launcher \
     /usr/local/bin/kiosk-xsession \
     /usr/local/sbin/rdp-power-action \
+    /usr/local/sbin/rdp-sync-netconfig \
     /usr/local/sbin/rdp-install-disk \
     /usr/local/sbin/rdp-save-target \
     /usr/local/sbin/rdp-load-config \
@@ -352,21 +404,18 @@ systemctl enable systemd-timesyncd.service
 systemctl enable avahi-daemon.service
 systemctl enable cups.service
 systemctl enable cups-browsed.service
+systemctl enable pcscd.service
 systemctl enable pcscd.socket
 systemctl enable kiosk-printer-setup.service
 systemctl enable rdp-load-config.service
 systemctl set-default multi-user.target
 systemctl mask getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
 
-# Ottimizzazione Livello 1: rimuove solo firmware inutilizzabili su Thin Client x86_64 cablato
-# (Wi-Fi/BT, acceleratori AI Data-Center senza video, switch 100GbE enterprise e SoC ARM)
+# Ottimizzazione Livello 1 (mantenendo tutti i firmware Ethernet e Wi-Fi per PC/Mini-PC):
+# rimuove solo acceleratori AI Data-Center senza video, switch 100GbE enterprise e SoC ARM
 for fw_root in /lib/firmware /usr/lib/firmware; do
     [ -d "$fw_root" ] || continue
     rm -rf \
-        "$fw_root"/iwlwifi* \
-        "$fw_root"/ath10k "$fw_root"/ath11k "$fw_root"/ath12k "$fw_root"/ath9k_htc "$fw_root"/ath6k "$fw_root"/ath3k* \
-        "$fw_root"/brcm "$fw_root"/mediatek "$fw_root"/mrvl "$fw_root"/rtlwifi "$fw_root"/rtw88 "$fw_root"/rtw89 \
-        "$fw_root"/ti-connectivity "$fw_root"/cypress "$fw_root"/qca "$fw_root"/libertas "$fw_root"/mwl8k "$fw_root"/rsi \
         "$fw_root"/netronome "$fw_root"/mellanox "$fw_root"/liquidio "$fw_root"/qed "$fw_root"/cxgb4 "$fw_root"/bnx2x \
         "$fw_root"/qcom "$fw_root"/meson "$fw_root"/rockchip "$fw_root"/sunxi "$fw_root"/amphion "$fw_root"/dpaa2 \
         "$fw_root"/nvidia/*/gsp \
@@ -498,10 +547,10 @@ grub-mkstandalone \
     -o "${ISO_DIR}/EFI/BOOT/BOOTIA32.EFI" \
     "boot/grub/grub.cfg=${WORK_DIR}/efi-chain.cfg" || true
 
-# Crea partizione persistente compatta RDPOS_CFG (4 MiB ext4 senza journal) integrata nell'ISO
-# per salvare IP, Dominio e Utente anche su chiavette Rufus in modalità DD e BalenaEtcher
+# Crea partizione persistente compatta RDPOS_CFG (8 MiB ext4 senza journal) integrata nell'ISO
+# per salvare IP/Dominio/Utente RDP, Wi-Fi e IP/DNS anche su chiavette Rufus in modalità DD e BalenaEtcher
 CFG_IMG="${WORK_DIR}/rdpos_cfg.img"
-dd if=/dev/zero of="${CFG_IMG}" bs=1M count=4 status=none
+dd if=/dev/zero of="${CFG_IMG}" bs=1M count=8 status=none
 mkfs.ext4 -F -b 1024 -O ^has_journal,^metadata_csum_seed -L RDPOS_CFG "${CFG_IMG}" >/dev/null
 
 grub-mkrescue \

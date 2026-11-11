@@ -234,6 +234,13 @@ clear_all_on_disconnect = false
 EOF
 fi
 
+# Trasferisce sul disco interno anche eventuali reti Wi-Fi e parametri IP/DNS già configurati in Live
+if [ -d /etc/NetworkManager/system-connections ] && [ -n "$(ls -A /etc/NetworkManager/system-connections 2>/dev/null)" ]; then
+    tar -cf "$TARGET_MNT/net-profiles.tar" -C /etc/NetworkManager/system-connections . 2>/dev/null || true
+elif [ -f /var/lib/rdp-kiosk/net-profiles.tar ]; then
+    cp -f /var/lib/rdp-kiosk/net-profiles.tar "$TARGET_MNT/net-profiles.tar" 2>/dev/null || true
+fi
+
 # 5. Installazione Bootloader GRUB (Legacy BIOS + UEFI 64-bit + UEFI 32-bit)
 echo "[4/5] Installazione bootloader GRUB per BIOS e UEFI..."
 grub-install \
