@@ -10,7 +10,9 @@ import datetime
 import errno
 import fcntl
 import json
+import math
 import os
+import re
 import shlex
 import shutil
 import struct
@@ -18,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 from pathlib import Path
 
 try:
@@ -106,6 +109,80 @@ window.kiosk-window {
     background-color: rgba(148, 163, 184, 0.12);
     color: #94a3b8;
     border: 1px solid rgba(148, 163, 184, 0.24);
+}
+
+button.btn-status-pill {
+    background-image: none;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+button.btn-status-pill.status-online {
+    background-color: rgba(16, 185, 129, 0.18);
+    color: #34d399;
+    border: 1px solid rgba(52, 211, 153, 0.42);
+}
+
+button.btn-status-pill.status-online:hover {
+    background-color: rgba(16, 185, 129, 0.30);
+}
+
+button.btn-status-pill.status-waiting {
+    background-color: rgba(245, 158, 11, 0.18);
+    color: #fbbf24;
+    border: 1px solid rgba(251, 191, 36, 0.42);
+}
+
+button.btn-status-pill.status-waiting:hover {
+    background-color: rgba(245, 158, 11, 0.30);
+}
+
+button.btn-status-pill.status-muted {
+    background-color: rgba(148, 163, 184, 0.14);
+    color: #94a3b8;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+button.btn-status-pill.status-muted:hover {
+    background-color: rgba(148, 163, 184, 0.26);
+    color: #cbd5e1;
+}
+
+.audio-section-box {
+    background-color: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 12px 14px;
+}
+
+.pct-badge {
+    color: #0f172a;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+scale.audio-scale trough {
+    background-color: #cbd5e1;
+    border-radius: 999px;
+    min-height: 8px;
+}
+
+scale.audio-scale highlight {
+    background-color: #2563eb;
+    border-radius: 999px;
+    min-height: 8px;
+}
+
+scale.audio-scale slider {
+    background-image: none;
+    background-color: #ffffff;
+    border: 2px solid #2563eb;
+    border-radius: 999px;
+    min-width: 18px;
+    min-height: 18px;
+    margin: -5px 0;
 }
 
 button.btn-topbar {
@@ -503,27 +580,27 @@ def get_smartcard_status() -> tuple[str, str, str]:
       stato in {"online", "waiting", "muted"}
     """
     if not HAS_PYSCARD:
-        return "muted", "○ Smart Card assente", "Libreria PC/SC non disponibile"
+        return "muted", "○ Smart Card", "Libreria PC/SC non disponibile"
     try:
         hres, hctx = SCardEstablishContext(SCARD_SCOPE_SYSTEM)
         if hres != 0:
-            return "muted", "○ Smart Card assente", "Nessun lettore Smart Card collegato"
+            return "muted", "○ Smart Card", "Nessun lettore Smart Card collegato"
         try:
             hres_r, readers = SCardListReaders(hctx, [])
             if hres_r != 0 or not readers:
-                return "muted", "○ Smart Card assente", "Nessun lettore Smart Card collegato"
+                return "muted", "○ Smart Card", "Nessun lettore Smart Card collegato"
             r_names = ", ".join(str(r) for r in readers)
             states = [(r, SCARD_STATE_UNAWARE) for r in readers]
             hres_s, new_states = SCardGetStatusChange(hctx, 0, states)
             if hres_s == 0:
                 for _reader, event_state, _atr in new_states:
                     if event_state & SCARD_STATE_PRESENT:
-                        return "online", "● Smart Card pronta", f"Lettore attivo: {r_names}"
-            return "waiting", "● Lettore collegato (inserisci carta)", f"Lettore rilevato: {r_names}"
+                        return "online", "● Smart Card", f"Smart Card pronta — Lettore attivo: {r_names}"
+            return "waiting", "● Lettore SC", f"Lettore rilevato (inserisci carta): {r_names}"
         finally:
             SCardReleaseContext(hctx)
     except Exception:
-        return "muted", "○ Smart Card assente", "Servizio Smart Card pronto"
+        return "muted", "○ Smart Card", "Servizio Smart Card pronto"
 
 
 def get_block_devices_signature() -> tuple[str, ...]:
@@ -561,15 +638,15 @@ def get_usb_drives_status() -> tuple[str, str, str]:
     if not mounted_names:
         return (
             "muted",
-            "○ USB assente",
+            "○ USB",
             "Nessuna pennetta USB montata (su VirtualBox attivala da Dispositivi → USB)",
         )
     if len(mounted_names) == 1:
         n0 = mounted_names[0]
-        short_n0 = (n0[:14] + "…") if len(n0) > 15 else n0
+        short_n0 = (n0[:12] + "…") if len(n0) > 13 else n0
         return "online", f"● USB: {short_n0}", f"Pennetta USB pronta per Desktop Remoto: {n0}"
     joined = ", ".join(mounted_names)
-    return "online", f"● {len(mounted_names)} USB pronte", f"Unità USB pronte: {joined}"
+    return "online", f"● {len(mounted_names)} USB", f"Unità USB pronte: {joined}"
 
 
 _WEBCAM_CAP_CACHE: dict[tuple[str, int], tuple[bool, str]] = {}
@@ -717,18 +794,376 @@ def get_webcam_status() -> tuple[str, str, str]:
     if not cameras:
         return (
             "muted",
-            "○ Webcam assente",
+            "○ Webcam",
             "Nessuna webcam rilevata dal Thin Client (su VirtualBox attivala da Dispositivi → Webcam)",
         )
     if len(cameras) == 1:
         c0 = cameras[0]
-        return "online", "● Webcam pronta", f"Webcam pronta per Desktop Remoto: {c0}"
+        return "online", "● Webcam", f"Webcam pronta per Desktop Remoto: {c0}"
     joined = ", ".join(cameras)
     return (
         "online",
-        f"● {len(cameras)} Webcam pronte",
+        f"● {len(cameras)} Webcam",
         f"Webcam pronte per Desktop Remoto: {joined}",
     )
+
+
+AUDIO_PREFS_USER_PATH = Path.home() / ".config" / "rdp-kiosk-audio.json"
+AUDIO_PREFS_SYS_PATH = Path("/var/lib/rdp-kiosk/audio-prefs.json")
+CHIME_WAV_PATH = Path("/tmp/rdp-kiosk-chime.wav")
+
+
+def _pactl_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
+def _parse_pactl_blocks(raw_text: str, header_prefix: str) -> list[dict]:
+    items: list[dict] = []
+    cur: dict | None = None
+    for line in (raw_text or "").splitlines():
+        if line.startswith(header_prefix):
+            if cur is not None:
+                items.append(cur)
+            cur = {
+                "name": "",
+                "description": "",
+                "muted": False,
+                "volume": 85,
+                "monitor_of": "n/a",
+            }
+            continue
+        if cur is None:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("Name:"):
+            cur["name"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Description:"):
+            cur["description"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Mute:"):
+            val = stripped.split(":", 1)[1].strip().lower()
+            cur["muted"] = val in ("yes", "true", "1")
+        elif stripped.startswith("Volume:") and not stripped.startswith("Volume Steps:"):
+            m = re.search(r"(\d+)\s*%", stripped)
+            if m:
+                cur["volume"] = max(0, min(100, int(m.group(1))))
+        elif stripped.startswith("Monitor of Sink:"):
+            cur["monitor_of"] = stripped.split(":", 1)[1].strip()
+    if cur is not None:
+        items.append(cur)
+    return items
+
+
+def query_audio_topology() -> dict:
+    """
+    Rileva uscite audio (sinks) e microfoni reali (sources) da PulseAudio,
+    escludendo i dispositivi fittizi 'auto_null' / 'Dummy Output' e i canali '.monitor',
+    con fallback su /proc/asound/pcm se PulseAudio si sta ancora inizializzando.
+    """
+    env = _pactl_env()
+    default_sink = ""
+    default_source = ""
+    sinks: list[dict] = []
+    sources: list[dict] = []
+    pactl_ok = False
+
+    try:
+        iproc = subprocess.run(
+            ["pactl", "info"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+            timeout=1.5,
+        )
+        if iproc.returncode == 0:
+            pactl_ok = True
+            for line in (iproc.stdout or "").splitlines():
+                if line.startswith("Default Sink:"):
+                    default_sink = line.split(":", 1)[1].strip()
+                elif line.startswith("Default Source:"):
+                    default_source = line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
+    if pactl_ok:
+        try:
+            sproc = subprocess.run(
+                ["pactl", "list", "sinks"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                env=env,
+                timeout=1.8,
+            )
+            for item in _parse_pactl_blocks(sproc.stdout or "", "Sink #"):
+                nm = item["name"]
+                desc = item["description"] or nm
+                if not nm or nm == "auto_null" or "dummy output" in desc.lower():
+                    continue
+                item["description"] = desc
+                item["is_default"] = nm == default_sink
+                sinks.append(item)
+        except Exception:
+            pass
+
+        try:
+            srcproc = subprocess.run(
+                ["pactl", "list", "sources"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                env=env,
+                timeout=1.8,
+            )
+            for item in _parse_pactl_blocks(srcproc.stdout or "", "Source #"):
+                nm = item["name"]
+                desc = item["description"] or nm
+                mon = item.get("monitor_of", "n/a")
+                if (
+                    not nm
+                    or nm.endswith(".monitor")
+                    or nm.startswith("auto_null")
+                    or (mon and mon.lower() != "n/a")
+                ):
+                    continue
+                item["description"] = desc
+                item["is_default"] = nm == default_source
+                sources.append(item)
+        except Exception:
+            pass
+
+        if sinks and not any(s["is_default"] for s in sinks):
+            sinks[0]["is_default"] = True
+        if sources and not any(s["is_default"] for s in sources):
+            sources[0]["is_default"] = True
+
+    # Fallback leggero su ALSA /proc/asound/pcm se PulseAudio non è ancora pronto
+    if not pactl_ok:
+        try:
+            pcm_txt = Path("/proc/asound/pcm").read_text(encoding="utf-8", errors="replace")
+            for line in pcm_txt.splitlines():
+                parts = [p.strip() for p in line.split(":")]
+                card_desc = parts[2] if len(parts) >= 3 else "Scheda Audio ALSA"
+                if "playback" in line and not sinks:
+                    sinks.append(
+                        {
+                            "name": "@DEFAULT_SINK@",
+                            "description": card_desc,
+                            "muted": False,
+                            "volume": 85,
+                            "is_default": True,
+                        }
+                    )
+                if "capture" in line and not sources:
+                    sources.append(
+                        {
+                            "name": "@DEFAULT_SOURCE@",
+                            "description": card_desc,
+                            "muted": False,
+                            "volume": 85,
+                            "is_default": True,
+                        }
+                    )
+        except Exception:
+            pass
+
+    return {
+        "pactl_ok": pactl_ok,
+        "sinks": sinks,
+        "sources": sources,
+    }
+
+
+def get_audio_status() -> tuple[str, str, str]:
+    """Restituisce (stato, etichetta_compatta, tooltip) per l'indicatore Audio + Microfono."""
+    topo = query_audio_topology()
+    sinks = topo["sinks"]
+    sources = topo["sources"]
+
+    if not sinks and not sources:
+        return (
+            "muted",
+            "○ Audio",
+            "Nessuna scheda audio rilevata (su VirtualBox controlla Impostazioni → Audio) — Clicca per aprire i controlli",
+        )
+
+    act_sink = next((s for s in sinks if s.get("is_default")), sinks[0]) if sinks else None
+    act_src = next((s for s in sources if s.get("is_default")), sources[0]) if sources else None
+
+    if act_sink and act_sink.get("muted", False):
+        return (
+            "waiting",
+            "🔇 Audio muto",
+            f"Uscita silenziata: {act_sink['description']} — Clicca per riattivare o regolare il volume",
+        )
+
+    if act_sink and act_src:
+        mic_note = (
+            f"{act_src['volume']}% (muto)"
+            if act_src.get("muted", False)
+            else f"{act_src['volume']}%"
+        )
+        return (
+            "online",
+            "🔊 Audio + Mic",
+            f"Uscita: {act_sink['description']} ({act_sink['volume']}%) | Mic: {act_src['description']} ({mic_note}) — Clicca per regolare il volume",
+        )
+
+    if act_sink:
+        return (
+            "waiting",
+            "🔊 Solo Audio",
+            f"Uscita: {act_sink['description']} ({act_sink['volume']}%) | Nessun microfono rilevato — Clicca per regolare il volume",
+        )
+
+    return (
+        "waiting",
+        "🎙 Solo Mic",
+        f"Nessuna uscita audio | Mic: {act_src['description']} ({act_src['volume']}%) — Clicca per regolare il volume",
+    )
+
+
+def load_audio_prefs() -> dict:
+    for p in (AUDIO_PREFS_USER_PATH, AUDIO_PREFS_SYS_PATH):
+        try:
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            continue
+    return {}
+
+
+def save_audio_prefs(prefs: dict, sync_disk: bool = False) -> None:
+    try:
+        AUDIO_PREFS_USER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = AUDIO_PREFS_USER_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(prefs, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(AUDIO_PREFS_USER_PATH)
+    except Exception:
+        pass
+    if sync_disk:
+        try:
+            subprocess.run(
+                ["sudo", "-n", "/usr/local/sbin/rdp-sync-netconfig"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            pass
+
+
+def apply_saved_audio_prefs() -> None:
+    """Riapplica all'avvio della UI il volume e le periferiche salvate dall'utente."""
+    prefs = load_audio_prefs()
+    if not prefs:
+        return
+    env = _pactl_env()
+    for _attempt in range(5):
+        topo = query_audio_topology()
+        if topo["pactl_ok"] and (topo["sinks"] or topo["sources"]):
+            break
+        time.sleep(0.6)
+
+    sink_names = {s["name"] for s in topo["sinks"]}
+    src_names = {s["name"] for s in topo["sources"]}
+
+    pref_sink = str(prefs.get("default_sink", "")).strip()
+    target_sink = pref_sink if pref_sink in sink_names else "@DEFAULT_SINK@"
+    if pref_sink and pref_sink in sink_names:
+        subprocess.run(
+            ["pactl", "set-default-sink", pref_sink],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=2,
+            check=False,
+        )
+    if "sink_volume" in prefs:
+        vol = max(0, min(100, int(prefs["sink_volume"])))
+        subprocess.run(
+            ["pactl", "set-sink-volume", target_sink, f"{vol}%"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=2,
+            check=False,
+        )
+    if "sink_muted" in prefs:
+        mval = "1" if bool(prefs["sink_muted"]) else "0"
+        subprocess.run(
+            ["pactl", "set-sink-mute", target_sink, mval],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=2,
+            check=False,
+        )
+
+    pref_src = str(prefs.get("default_source", "")).strip()
+    target_src = pref_src if pref_src in src_names else "@DEFAULT_SOURCE@"
+    if pref_src and pref_src in src_names:
+        subprocess.run(
+            ["pactl", "set-default-source", pref_src],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=2,
+            check=False,
+        )
+    if "source_volume" in prefs:
+        svol = max(0, min(100, int(prefs["source_volume"])))
+        subprocess.run(
+            ["pactl", "set-source-volume", target_src, f"{svol}%"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=2,
+            check=False,
+        )
+    if "source_muted" in prefs:
+        smval = "1" if bool(prefs["source_muted"]) else "0"
+        subprocess.run(
+            ["pactl", "set-source-mute", target_src, smval],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=2,
+            check=False,
+        )
+
+
+def _ensure_chime_wav() -> Path:
+    """Genera un breve suono di prova armonico (Do5 -> Mi5) in PCM 16-bit senza dipendenze esterne."""
+    if CHIME_WAV_PATH.is_file() and CHIME_WAV_PATH.stat().st_size > 1000:
+        return CHIME_WAV_PATH
+    sample_rate = 44100
+    notes = [(523.25, 0.18), (659.25, 0.24)]
+    frames = bytearray()
+    for freq, dur in notes:
+        n_samples = int(sample_rate * dur)
+        fade = max(1, int(sample_rate * 0.018))
+        for i in range(n_samples):
+            env_amp = 1.0
+            if i < fade:
+                env_amp = i / fade
+            elif i > n_samples - fade:
+                env_amp = (n_samples - i) / fade
+            sample = int(14500 * env_amp * math.sin(2.0 * math.pi * freq * (i / sample_rate)))
+            frames.extend(struct.pack("<h", sample))
+    with wave.open(str(CHIME_WAV_PATH), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(bytes(frames))
+    return CHIME_WAV_PATH
 
 
 def translate_freerdp_error(returncode: int, stderr_text: str) -> str:
@@ -795,11 +1230,25 @@ class RdpKioskWindow(Gtk.Window):
         self.bt_has_adapter = False
         self.bt_devices: list[dict] = []
         self.selected_bt_device: dict | None = None
+        self.audio_sinks: list[dict] = []
+        self.audio_sources: list[dict] = []
+        self._audio_updating_ui = False
+        self._sink_vol_timer_id: int | None = None
+        self._src_vol_timer_id: int | None = None
+        self._testing_audio = False
 
         self._apply_css()
         self._configure_window()
         self._build_ui()
         self.reset_mask(initial=True)
+
+        threading.Thread(
+            target=lambda: (
+                apply_saved_audio_prefs(),
+                GLib.idle_add(lambda: self._trigger_status_poll() or False),
+            ),
+            daemon=True,
+        ).start()
 
         self._update_status_bar()
         GLib.timeout_add_seconds(2, self._update_status_bar)
@@ -858,19 +1307,26 @@ class RdpKioskWindow(Gtk.Window):
         spacer = Gtk.Box()
         topbar.pack_start(spacer, True, True, 0)
 
-        self.cam_badge = Gtk.Label(label="○ Webcam assente")
+        self.audio_btn = Gtk.Button(label="○ Audio")
+        self.audio_btn.get_style_context().add_class("btn-status-pill")
+        self.audio_btn.get_style_context().add_class("status-muted")
+        self.audio_btn.set_tooltip_text("Stato Audio e Microfono — Clicca per regolare il volume")
+        self.audio_btn.connect("clicked", lambda _w: self._open_audio_panel())
+        topbar.pack_start(self.audio_btn, False, False, 0)
+
+        self.cam_badge = Gtk.Label(label="○ Webcam")
         self.cam_badge.get_style_context().add_class("status-pill")
         self.cam_badge.get_style_context().add_class("status-muted")
         self.cam_badge.set_tooltip_text("Stato webcam condivisa in Desktop Remoto (MS-RDPECAM)")
         topbar.pack_start(self.cam_badge, False, False, 0)
 
-        self.usb_badge = Gtk.Label(label="○ USB assente")
+        self.usb_badge = Gtk.Label(label="○ USB")
         self.usb_badge.get_style_context().add_class("status-pill")
         self.usb_badge.get_style_context().add_class("status-muted")
         self.usb_badge.set_tooltip_text("Stato pennette e dischi esterni USB condivisi in RDP")
         topbar.pack_start(self.usb_badge, False, False, 0)
 
-        self.sc_badge = Gtk.Label(label="○ Smart Card assente")
+        self.sc_badge = Gtk.Label(label="○ Smart Card")
         self.sc_badge.get_style_context().add_class("status-pill")
         self.sc_badge.get_style_context().add_class("status-muted")
         self.sc_badge.set_tooltip_text("Stato lettore Smart Card / CNS / CIE")
@@ -925,6 +1381,7 @@ class RdpKioskWindow(Gtk.Window):
         self.stack.add_named(self._build_power_confirm(), "confirm_power")
         self.stack.add_named(self._build_network_panel(), "network")
         self.stack.add_named(self._build_bluetooth_panel(), "bluetooth")
+        self.stack.add_named(self._build_audio_panel(), "audio")
 
     def _build_login_form(self) -> Gtk.Widget:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -1908,6 +2365,530 @@ class RdpKioskWindow(Gtk.Window):
         self.bt_disc_btn.set_sensitive(is_conn)
         self.bt_remove_btn.set_sensitive(is_paired or is_conn)
 
+    def _build_audio_panel(self) -> Gtk.Widget:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+
+        hdr_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title_lbl = Gtk.Label(label="Audio e Microfono")
+        title_lbl.get_style_context().add_class("card-header")
+        title_lbl.set_halign(Gtk.Align.START)
+        hdr_row.pack_start(title_lbl, True, True, 0)
+
+        back_btn = Gtk.Button(label="← Login")
+        back_btn.get_style_context().add_class("btn-secondary")
+        back_btn.connect("clicked", lambda _w: self._close_audio_panel())
+        hdr_row.pack_start(back_btn, False, False, 0)
+        vbox.pack_start(hdr_row, False, False, 0)
+
+        sub_lbl = Gtk.Label(
+            label="Regola il volume di altoparlanti/cuffie e del microfono per la sessione Desktop Remoto."
+        )
+        sub_lbl.get_style_context().add_class("card-subtitle")
+        sub_lbl.set_halign(Gtk.Align.START)
+        sub_lbl.set_line_wrap(True)
+        sub_lbl.set_xalign(0.0)
+        vbox.pack_start(sub_lbl, False, False, 0)
+
+        self.audio_banner_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.audio_banner_box.get_style_context().add_class("alert-banner")
+        self.audio_banner_box.set_no_show_all(True)
+        self.audio_spinner = Gtk.Spinner()
+        self.audio_banner_box.pack_start(self.audio_spinner, False, False, 0)
+        self.audio_banner_lbl = Gtk.Label(label="")
+        self.audio_banner_lbl.set_line_wrap(True)
+        self.audio_banner_lbl.set_max_width_chars(50)
+        self.audio_banner_lbl.set_xalign(0.0)
+        self.audio_banner_box.pack_start(self.audio_banner_lbl, True, True, 0)
+        vbox.pack_start(self.audio_banner_box, False, False, 0)
+
+        # --- Sezione Uscita Audio ---
+        out_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        out_box.get_style_context().add_class("audio-section-box")
+
+        out_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        out_lbl = Gtk.Label(label="🔊 Uscita Audio (Altoparlanti / Cuffie / HDMI)")
+        out_lbl.get_style_context().add_class("field-label")
+        out_lbl.set_halign(Gtk.Align.START)
+        out_hdr.pack_start(out_lbl, True, True, 0)
+        out_box.pack_start(out_hdr, False, False, 0)
+
+        self.sink_combo = Gtk.ComboBoxText()
+        self.sink_combo.connect("changed", self._on_sink_combo_changed)
+        out_box.pack_start(self.sink_combo, False, False, 0)
+
+        out_ctrl = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.sink_adj = Gtk.Adjustment(value=85, lower=0, upper=100, step_increment=1, page_increment=5)
+        self.sink_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.sink_adj)
+        self.sink_scale.get_style_context().add_class("audio-scale")
+        self.sink_scale.set_draw_value(False)
+        self.sink_scale.set_hexpand(True)
+        self.sink_scale.connect("value-changed", self._on_sink_scale_changed)
+        out_ctrl.pack_start(self.sink_scale, True, True, 0)
+
+        self.sink_pct_lbl = Gtk.Label(label="85%")
+        self.sink_pct_lbl.get_style_context().add_class("pct-badge")
+        self.sink_pct_lbl.set_width_chars(5)
+        self.sink_pct_lbl.set_xalign(1.0)
+        out_ctrl.pack_start(self.sink_pct_lbl, False, False, 0)
+
+        self.sink_mute_btn = Gtk.Button(label="🔇 Muto")
+        self.sink_mute_btn.get_style_context().add_class("btn-secondary")
+        self.sink_mute_btn.connect("clicked", lambda _w: self._on_sink_mute_clicked())
+        out_ctrl.pack_start(self.sink_mute_btn, False, False, 0)
+
+        self.test_sound_btn = Gtk.Button(label="🎵 Prova")
+        self.test_sound_btn.get_style_context().add_class("btn-secondary")
+        self.test_sound_btn.set_tooltip_text("Riproduce un breve suono di prova sugli altoparlanti o cuffie")
+        self.test_sound_btn.connect("clicked", lambda _w: self._on_audio_test_sound())
+        out_ctrl.pack_start(self.test_sound_btn, False, False, 0)
+
+        out_box.pack_start(out_ctrl, False, False, 0)
+        vbox.pack_start(out_box, False, False, 0)
+
+        # --- Sezione Microfono ---
+        mic_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        mic_box.get_style_context().add_class("audio-section-box")
+
+        mic_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        mic_lbl = Gtk.Label(label="🎙 Ingresso Microfono")
+        mic_lbl.get_style_context().add_class("field-label")
+        mic_lbl.set_halign(Gtk.Align.START)
+        mic_hdr.pack_start(mic_lbl, True, True, 0)
+        mic_box.pack_start(mic_hdr, False, False, 0)
+
+        self.source_combo = Gtk.ComboBoxText()
+        self.source_combo.connect("changed", self._on_source_combo_changed)
+        mic_box.pack_start(self.source_combo, False, False, 0)
+
+        mic_ctrl = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.source_adj = Gtk.Adjustment(value=85, lower=0, upper=100, step_increment=1, page_increment=5)
+        self.source_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.source_adj)
+        self.source_scale.get_style_context().add_class("audio-scale")
+        self.source_scale.set_draw_value(False)
+        self.source_scale.set_hexpand(True)
+        self.source_scale.connect("value-changed", self._on_source_scale_changed)
+        mic_ctrl.pack_start(self.source_scale, True, True, 0)
+
+        self.source_pct_lbl = Gtk.Label(label="85%")
+        self.source_pct_lbl.get_style_context().add_class("pct-badge")
+        self.source_pct_lbl.set_width_chars(5)
+        self.source_pct_lbl.set_xalign(1.0)
+        mic_ctrl.pack_start(self.source_pct_lbl, False, False, 0)
+
+        self.source_mute_btn = Gtk.Button(label="🔇 Muto")
+        self.source_mute_btn.get_style_context().add_class("btn-secondary")
+        self.source_mute_btn.connect("clicked", lambda _w: self._on_source_mute_clicked())
+        mic_ctrl.pack_start(self.source_mute_btn, False, False, 0)
+
+        mic_box.pack_start(mic_ctrl, False, False, 0)
+        vbox.pack_start(mic_box, False, False, 0)
+
+        # --- Barra inferiore ---
+        foot_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        refresh_btn = Gtk.Button(label="🔄 Aggiorna periferiche")
+        refresh_btn.get_style_context().add_class("btn-secondary")
+        refresh_btn.connect("clicked", lambda _w: self._refresh_audio_panel_async())
+        foot_row.pack_start(refresh_btn, False, False, 0)
+
+        a_spacer = Gtk.Box()
+        foot_row.pack_start(a_spacer, True, True, 0)
+
+        done_btn = Gtk.Button(label="Salva e Chiudi")
+        done_btn.get_style_context().add_class("btn-connect")
+        done_btn.connect("clicked", lambda _w: self._close_audio_panel())
+        foot_row.pack_start(done_btn, False, False, 0)
+
+        vbox.pack_start(foot_row, False, False, 2)
+        return vbox
+
+    def _show_audio_banner(self, msg: str, kind: str = "info", spinning: bool = False) -> None:
+        ctx = self.audio_banner_box.get_style_context()
+        for c in ("alert-error", "alert-info", "alert-success"):
+            ctx.remove_class(c)
+        ctx.add_class(f"alert-{kind}")
+        self.audio_banner_lbl.set_text(msg)
+        if spinning:
+            self.audio_spinner.show()
+            self.audio_spinner.start()
+        else:
+            self.audio_spinner.stop()
+            self.audio_spinner.hide()
+        self.audio_banner_lbl.show()
+        self.audio_banner_box.show()
+
+    def _hide_audio_banner(self) -> None:
+        self.audio_spinner.stop()
+        self.audio_banner_box.hide()
+
+    def _open_audio_panel(self) -> None:
+        if self.connecting:
+            return
+        self._hide_audio_banner()
+        self.stack.set_visible_child_name("audio")
+        self._refresh_audio_panel_async()
+
+    def _collect_current_audio_prefs(self) -> dict:
+        prefs = load_audio_prefs()
+        sink_id = self.sink_combo.get_active_id()
+        if sink_id and sink_id != "__none__":
+            prefs["default_sink"] = sink_id
+            prefs["sink_volume"] = int(round(self.sink_scale.get_value()))
+            act_s = next((s for s in self.audio_sinks if s["name"] == sink_id), None)
+            if act_s is not None:
+                prefs["sink_muted"] = bool(act_s.get("muted", False))
+        src_id = self.source_combo.get_active_id()
+        if src_id and src_id != "__none__":
+            prefs["default_source"] = src_id
+            prefs["source_volume"] = int(round(self.source_scale.get_value()))
+            act_m = next((s for s in self.audio_sources if s["name"] == src_id), None)
+            if act_m is not None:
+                prefs["source_muted"] = bool(act_m.get("muted", False))
+        return prefs
+
+    def _close_audio_panel(self) -> None:
+        prefs = self._collect_current_audio_prefs()
+        threading.Thread(
+            target=lambda: save_audio_prefs(prefs, sync_disk=True),
+            daemon=True,
+        ).start()
+        self.stack.set_visible_child_name("login")
+        self._trigger_status_poll()
+
+    def _refresh_audio_panel_async(self) -> None:
+        def _worker() -> None:
+            topo = query_audio_topology()
+            GLib.idle_add(self._populate_audio_panel, topo)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _populate_audio_panel(self, topo: dict) -> bool:
+        self._audio_updating_ui = True
+        try:
+            self.audio_sinks = topo.get("sinks", [])
+            self.audio_sources = topo.get("sources", [])
+
+            self.sink_combo.remove_all()
+            if not self.audio_sinks:
+                self.sink_combo.append("__none__", "Nessuna uscita audio rilevata")
+                self.sink_combo.set_active_id("__none__")
+                self.sink_combo.set_sensitive(False)
+                self.sink_scale.set_sensitive(False)
+                self.sink_mute_btn.set_sensitive(False)
+                self.test_sound_btn.set_sensitive(False)
+                self.sink_pct_lbl.set_text("--")
+            else:
+                def_sink_id = self.audio_sinks[0]["name"]
+                for s in self.audio_sinks:
+                    self.sink_combo.append(s["name"], s["description"])
+                    if s.get("is_default"):
+                        def_sink_id = s["name"]
+                self.sink_combo.set_active_id(def_sink_id)
+                self.sink_combo.set_sensitive(len(self.audio_sinks) > 1)
+                self.sink_scale.set_sensitive(True)
+                self.sink_mute_btn.set_sensitive(True)
+                self.test_sound_btn.set_sensitive(not self._testing_audio)
+                cur_s = next(
+                    (s for s in self.audio_sinks if s["name"] == def_sink_id),
+                    self.audio_sinks[0],
+                )
+                vol = int(cur_s.get("volume", 85))
+                muted = bool(cur_s.get("muted", False))
+                self.sink_scale.set_value(vol)
+                self.sink_pct_lbl.set_text("Muto" if muted else f"{vol}%")
+                self.sink_mute_btn.set_label("🔊 Attiva" if muted else "🔇 Muto")
+
+            self.source_combo.remove_all()
+            if not self.audio_sources:
+                self.source_combo.append("__none__", "Nessun microfono rilevato")
+                self.source_combo.set_active_id("__none__")
+                self.source_combo.set_sensitive(False)
+                self.source_scale.set_sensitive(False)
+                self.source_mute_btn.set_sensitive(False)
+                self.source_pct_lbl.set_text("--")
+            else:
+                def_src_id = self.audio_sources[0]["name"]
+                for m in self.audio_sources:
+                    self.source_combo.append(m["name"], m["description"])
+                    if m.get("is_default"):
+                        def_src_id = m["name"]
+                self.source_combo.set_active_id(def_src_id)
+                self.source_combo.set_sensitive(len(self.audio_sources) > 1)
+                self.source_scale.set_sensitive(True)
+                self.source_mute_btn.set_sensitive(True)
+                cur_m = next(
+                    (m for m in self.audio_sources if m["name"] == def_src_id),
+                    self.audio_sources[0],
+                )
+                mvol = int(cur_m.get("volume", 85))
+                mmuted = bool(cur_m.get("muted", False))
+                self.source_scale.set_value(mvol)
+                self.source_pct_lbl.set_text("Muto" if mmuted else f"{mvol}%")
+                self.source_mute_btn.set_label("🎙 Attiva" if mmuted else "🔇 Muto")
+
+            if not self.audio_sinks and not self.audio_sources:
+                self._show_audio_banner(
+                    "Nessuna scheda audio rilevata. Su VirtualBox verifica Impostazioni → Audio → Abilita audio.",
+                    kind="error",
+                    spinning=False,
+                )
+            elif not self.audio_sources:
+                self._show_audio_banner(
+                    "Uscita audio pronta. Nessun microfono rilevato (su VirtualBox spunta anche 'Abilita ingresso audio').",
+                    kind="info",
+                    spinning=False,
+                )
+            else:
+                self._hide_audio_banner()
+        finally:
+            self._audio_updating_ui = False
+        return False
+
+    def _on_sink_combo_changed(self, combo: Gtk.ComboBoxText) -> None:
+        if self._audio_updating_ui:
+            return
+        sink_id = combo.get_active_id()
+        if not sink_id or sink_id == "__none__":
+            return
+
+        def _apply() -> None:
+            env = _pactl_env()
+            subprocess.run(
+                ["pactl", "set-default-sink", sink_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                timeout=2,
+                check=False,
+            )
+            topo = query_audio_topology()
+            GLib.idle_add(self._populate_audio_panel, topo)
+            GLib.idle_add(lambda: self._trigger_status_poll() or False)
+
+        threading.Thread(target=_apply, daemon=True).start()
+
+    def _on_source_combo_changed(self, combo: Gtk.ComboBoxText) -> None:
+        if self._audio_updating_ui:
+            return
+        src_id = combo.get_active_id()
+        if not src_id or src_id == "__none__":
+            return
+
+        def _apply() -> None:
+            env = _pactl_env()
+            subprocess.run(
+                ["pactl", "set-default-source", src_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                timeout=2,
+                check=False,
+            )
+            topo = query_audio_topology()
+            GLib.idle_add(self._populate_audio_panel, topo)
+            GLib.idle_add(lambda: self._trigger_status_poll() or False)
+
+        threading.Thread(target=_apply, daemon=True).start()
+
+    def _on_sink_scale_changed(self, scale: Gtk.Scale) -> None:
+        if self._audio_updating_ui:
+            return
+        vol = int(round(scale.get_value()))
+        sink_id = self.sink_combo.get_active_id()
+        if not sink_id or sink_id == "__none__":
+            return
+        self.sink_pct_lbl.set_text(f"{vol}%")
+        self.sink_mute_btn.set_label("🔇 Muto")
+        for s in self.audio_sinks:
+            if s["name"] == sink_id:
+                s["volume"] = vol
+                s["muted"] = False
+
+        if self._sink_vol_timer_id is not None:
+            GLib.source_remove(self._sink_vol_timer_id)
+
+        def _commit_vol() -> bool:
+            self._sink_vol_timer_id = None
+            prefs = self._collect_current_audio_prefs()
+
+            def _bg() -> None:
+                env = _pactl_env()
+                subprocess.run(
+                    ["pactl", "set-sink-mute", sink_id, "0"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    timeout=2,
+                    check=False,
+                )
+                subprocess.run(
+                    ["pactl", "set-sink-volume", sink_id, f"{vol}%"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    timeout=2,
+                    check=False,
+                )
+                save_audio_prefs(prefs, sync_disk=False)
+                GLib.idle_add(lambda: self._trigger_status_poll() or False)
+
+            threading.Thread(target=_bg, daemon=True).start()
+            return False
+
+        self._sink_vol_timer_id = GLib.timeout_add(65, _commit_vol)
+
+    def _on_source_scale_changed(self, scale: Gtk.Scale) -> None:
+        if self._audio_updating_ui:
+            return
+        vol = int(round(scale.get_value()))
+        src_id = self.source_combo.get_active_id()
+        if not src_id or src_id == "__none__":
+            return
+        self.source_pct_lbl.set_text(f"{vol}%")
+        self.source_mute_btn.set_label("🔇 Muto")
+        for m in self.audio_sources:
+            if m["name"] == src_id:
+                m["volume"] = vol
+                m["muted"] = False
+
+        if self._src_vol_timer_id is not None:
+            GLib.source_remove(self._src_vol_timer_id)
+
+        def _commit_src_vol() -> bool:
+            self._src_vol_timer_id = None
+            prefs = self._collect_current_audio_prefs()
+
+            def _bg() -> None:
+                env = _pactl_env()
+                subprocess.run(
+                    ["pactl", "set-source-mute", src_id, "0"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    timeout=2,
+                    check=False,
+                )
+                subprocess.run(
+                    ["pactl", "set-source-volume", src_id, f"{vol}%"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    timeout=2,
+                    check=False,
+                )
+                save_audio_prefs(prefs, sync_disk=False)
+                GLib.idle_add(lambda: self._trigger_status_poll() or False)
+
+            threading.Thread(target=_bg, daemon=True).start()
+            return False
+
+        self._src_vol_timer_id = GLib.timeout_add(65, _commit_src_vol)
+
+    def _on_sink_mute_clicked(self) -> None:
+        sink_id = self.sink_combo.get_active_id()
+        if not sink_id or sink_id == "__none__":
+            return
+        cur = next((s for s in self.audio_sinks if s["name"] == sink_id), None)
+        new_muted = not bool(cur.get("muted", False)) if cur else True
+        if cur is not None:
+            cur["muted"] = new_muted
+        vol = int(round(self.sink_scale.get_value()))
+        self.sink_pct_lbl.set_text("Muto" if new_muted else f"{vol}%")
+        self.sink_mute_btn.set_label("🔊 Attiva" if new_muted else "🔇 Muto")
+        prefs = self._collect_current_audio_prefs()
+
+        def _bg() -> None:
+            env = _pactl_env()
+            subprocess.run(
+                ["pactl", "set-sink-mute", sink_id, "1" if new_muted else "0"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                timeout=2,
+                check=False,
+            )
+            save_audio_prefs(prefs, sync_disk=False)
+            GLib.idle_add(lambda: self._trigger_status_poll() or False)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_source_mute_clicked(self) -> None:
+        src_id = self.source_combo.get_active_id()
+        if not src_id or src_id == "__none__":
+            return
+        cur = next((m for m in self.audio_sources if m["name"] == src_id), None)
+        new_muted = not bool(cur.get("muted", False)) if cur else True
+        if cur is not None:
+            cur["muted"] = new_muted
+        vol = int(round(self.source_scale.get_value()))
+        self.source_pct_lbl.set_text("Muto" if new_muted else f"{vol}%")
+        self.source_mute_btn.set_label("🎙 Attiva" if new_muted else "🔇 Muto")
+        prefs = self._collect_current_audio_prefs()
+
+        def _bg() -> None:
+            env = _pactl_env()
+            subprocess.run(
+                ["pactl", "set-source-mute", src_id, "1" if new_muted else "0"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                timeout=2,
+                check=False,
+            )
+            save_audio_prefs(prefs, sync_disk=False)
+            GLib.idle_add(lambda: self._trigger_status_poll() or False)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_audio_test_sound(self) -> None:
+        if self._testing_audio or not self.audio_sinks:
+            return
+        self._testing_audio = True
+        self.test_sound_btn.set_sensitive(False)
+        self._show_audio_banner("🎵 Riproduzione suono di prova in corso...", kind="info", spinning=True)
+        sink_id = self.sink_combo.get_active_id()
+
+        def _play() -> None:
+            ok = False
+            try:
+                wav_path = _ensure_chime_wav()
+                cmd = ["paplay"]
+                if sink_id and sink_id not in ("__none__", "@DEFAULT_SINK@"):
+                    cmd.extend(["--device", sink_id])
+                cmd.append(str(wav_path))
+                p = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+                if p.returncode == 0:
+                    ok = True
+                else:
+                    p2 = subprocess.run(
+                        ["aplay", "-q", str(wav_path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
+                        check=False,
+                    )
+                    ok = p2.returncode == 0
+            except Exception:
+                ok = False
+
+            def _done() -> bool:
+                self._testing_audio = False
+                self.test_sound_btn.set_sensitive(bool(self.audio_sinks))
+                if ok:
+                    self._show_audio_banner("✓ Suono di prova riprodotto correttamente.", kind="success", spinning=False)
+                else:
+                    self._show_audio_banner("Impossibile riprodurre il suono di prova sulla periferica selezionata.", kind="error", spinning=False)
+                return False
+
+            GLib.idle_add(_done)
+
+        threading.Thread(target=_play, daemon=True).start()
+
     def _prompt_power_action(self, action: str) -> None:
         if self.connecting:
             return
@@ -2008,6 +2989,7 @@ class RdpKioskWindow(Gtk.Window):
                 sc_state, sc_text, sc_tip = get_smartcard_status()
                 usb_state, usb_text, usb_tip = get_usb_drives_status()
                 cam_state, cam_text, cam_tip = get_webcam_status()
+                aud_state, aud_text, aud_tip = get_audio_status()
                 GLib.idle_add(
                     self._apply_status_badges,
                     net_state,
@@ -2021,6 +3003,9 @@ class RdpKioskWindow(Gtk.Window):
                     cam_state,
                     cam_text,
                     cam_tip,
+                    aud_state,
+                    aud_text,
+                    aud_tip,
                 )
             finally:
                 self._status_polling = False
@@ -2040,6 +3025,9 @@ class RdpKioskWindow(Gtk.Window):
         cam_state: str,
         cam_text: str,
         cam_tip: str,
+        aud_state: str,
+        aud_text: str,
+        aud_tip: str,
     ) -> bool:
         self.net_badge.set_text(net_text)
         n_ctx = self.net_badge.get_style_context()
@@ -2067,6 +3055,13 @@ class RdpKioskWindow(Gtk.Window):
         for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
             c_ctx.remove_class(cls)
         c_ctx.add_class(f"status-{cam_state}")
+
+        self.audio_btn.set_label(aud_text)
+        self.audio_btn.set_tooltip_text(aud_tip)
+        a_ctx = self.audio_btn.get_style_context()
+        for cls in ("status-online", "status-waiting", "status-offline", "status-muted"):
+            a_ctx.remove_class(cls)
+        a_ctx.add_class(f"status-{aud_state}")
         return False
 
     def _show_banner(self, message: str, is_error: bool = True, spinning: bool = False) -> None:
@@ -2100,6 +3095,7 @@ class RdpKioskWindow(Gtk.Window):
             self.clear_btn,
             self.reboot_btn,
             self.poweroff_btn,
+            self.audio_btn,
             self.net_settings_btn,
             self.bt_settings_btn,
         ):

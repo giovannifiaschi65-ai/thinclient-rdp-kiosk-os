@@ -35,6 +35,17 @@ else
     rm -f "$TMP_BT" 2>/dev/null || true
 fi
 
+USER_AUDIO="/home/kiosk/.config/rdp-kiosk-audio.json"
+FINAL_AUDIO="/var/lib/rdp-kiosk/audio-prefs.json"
+HAVE_AUDIO=0
+if [ -s "$USER_AUDIO" ]; then
+    cp -f "$USER_AUDIO" "$FINAL_AUDIO" 2>/dev/null || true
+    chmod 0644 "$FINAL_AUDIO" 2>/dev/null || true
+fi
+if [ -s "$FINAL_AUDIO" ]; then
+    HAVE_AUDIO=1
+fi
+
 copy_archives_to_dir() {
     local dest_dir="$1"
     if [ "$HAVE_NET" -eq 1 ]; then
@@ -47,6 +58,12 @@ copy_archives_to_dir() {
         local tmp_b="${dest_dir}/bt-profiles.tar.tmp.$$"
         if cp -f "$FINAL_BT" "$tmp_b" 2>/dev/null; then
             mv -f "$tmp_b" "${dest_dir}/bt-profiles.tar" 2>/dev/null || true
+        fi
+    fi
+    if [ "$HAVE_AUDIO" -eq 1 ]; then
+        local tmp_a="${dest_dir}/audio-prefs.json.tmp.$$"
+        if cp -f "$FINAL_AUDIO" "$tmp_a" 2>/dev/null; then
+            mv -f "$tmp_a" "${dest_dir}/audio-prefs.json" 2>/dev/null || true
         fi
     fi
 }

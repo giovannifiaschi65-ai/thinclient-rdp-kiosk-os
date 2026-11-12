@@ -138,6 +138,7 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     firmware-atheros \
     firmware-brcm80211 \
     firmware-amd-graphics \
+    firmware-sof-signed \
     network-manager \
     wpasupplicant \
     wireless-regdb \
@@ -182,8 +183,10 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     fonts-dejavu-core \
     fonts-liberation2 \
     pulseaudio \
+    pulseaudio-utils \
     libpulse0 \
     alsa-utils \
+    alsa-ucm-conf \
     libv4l-0 \
     libv4lconvert0 \
     libusb-1.0-0 \

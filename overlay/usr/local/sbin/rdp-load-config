@@ -38,6 +38,15 @@ restore_from_dir() {
         chmod 0700 /var/lib/bluetooth 2>/dev/null || true
         BT_RESTORED=1
     fi
+    if [ -f "${src_dir}/audio-prefs.json" ]; then
+        cp -f "${src_dir}/audio-prefs.json" "/var/lib/rdp-kiosk/audio-prefs.json"
+        chmod 0644 "/var/lib/rdp-kiosk/audio-prefs.json"
+        if id -u kiosk >/dev/null 2>&1; then
+            mkdir -p /home/kiosk/.config
+            cp -f "${src_dir}/audio-prefs.json" "/home/kiosk/.config/rdp-kiosk-audio.json"
+            chown -R kiosk:kiosk /home/kiosk/.config 2>/dev/null || true
+        fi
+    fi
 }
 
 # 1. Verifica prima il supporto Live montato (Disco Interno RDPOS_ROOT o Rufus ISO FAT32)
